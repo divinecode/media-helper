@@ -47,7 +47,7 @@ def extract_video_id(tiktok_url: str) -> str | None:
     if match:
         print(f"Получил: {match.group(1)}")
         return match.group(1)
-    pring(f"Не получилось извлечь ID")
+    print(f"Не получилось извлечь ID")
     return None
 
 async def download_tiktok_video(tiktok_url: str) -> bytes | None:
