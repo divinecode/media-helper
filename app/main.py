@@ -11,6 +11,8 @@ from telegram.ext import (
     filters
 )
 import yt_dlp
+import aiohttp
+import asyncio
 from telebot.types import ReactionTypeEmoji
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
@@ -23,6 +25,9 @@ ALLOWED_USERNAMES = [u.strip() for u in ALLOWED_USERNAMES.split(",") if u.strip(
 TIKTOK_LINK_REGEX = re.compile(r"https?://(?:vt\.)?(?:www\.)?tiktok\.com/[\w\-/.@]+")
 TIKTOK_VIDEO_ID_REGEX = re.compile(r"/video/(\d+)")
 TIKTOK_SHORT_LINK_REGEX = re.compile(r"https?://(?!www\.)[a-zA-Z0-9_-]+\.(?:tiktok|douyin)\.com")
+
+COUB_LINK_REGEX = re.compile(r"https?://coub\.com/view/(\w+)")
+COUB_API_URL = "https://coub.com/api/v2/coubs/{coub_id}"
 
 cookies_file = 'cookies.txt'
 
@@ -149,6 +154,109 @@ async def download_youtube_shorts(url: str) -> bytes | None:
         print(f"Ошибка при скачивании видео с Youtube: {e}")
         return None
 
+
+def download_file(url: str, filename: str) -> str:
+    """
+    Download a file from a URL and save it locally.
+    """
+    try:
+        response = requests.get(url, stream=True, timeout=10)
+        response.raise_for_status()
+        with open(filename, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+        return filename
+    except Exception as e:
+        print(f"Failed to download file: {e}")
+        return ""
+
+async def fetch_coub_data(coub_url: str) -> dict | None:
+    """
+    Получает данные о видео Coub через API.
+    """
+    try:
+        # Извлекаем ID из ссылки
+        coub_id_match = re.search(r"coub\.com/view/(\w+)", coub_url)
+        if not coub_id_match:
+            print("Неверный формат ссылки Coub.")
+            return None
+
+        coub_id = coub_id_match.group(1)
+        api_url = f"https://coub.com/api/v2/coubs/{coub_id}"
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(api_url) as response:
+                response.raise_for_status()
+                return await response.json()
+    except Exception as e:
+        print(f"Ошибка при получении данных Coub: {e}")
+        return None
+
+async def download_coub_video(coub_url: str) -> bytes | None:
+    """
+    Downloads and merges Coub video and audio, looping the video until the audio ends.
+    Uses H.265 for better compression.
+    """
+    
+    try:
+        coub_data = await fetch_coub_data(coub_url)
+        if not coub_data or not coub_data.get("file_versions"):
+            print("Failed to fetch video data.")
+            return None
+
+        video_url = coub_data["file_versions"]["html5"]["video"]["high"]["url"]
+        audio_url = coub_data["file_versions"]["html5"]["audio"]["high"]["url"]
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(video_url) as video_response:
+                video_response.raise_for_status()
+                video_data = await video_response.read()
+
+            async with session.get(audio_url) as audio_response:
+                audio_response.raise_for_status()
+                audio_data = await audio_response.read()
+
+        # Save temporary files
+        video_path = "temp_coub_video.mp4"
+        audio_path = "temp_coub_audio.mp3"
+        output_path = "temp_coub_output.mp4"
+
+        with open(video_path, "wb") as f:
+            f.write(video_data)
+        with open(audio_path, "wb") as f:
+            f.write(audio_data)
+
+        # Use ffmpeg to loop video until audio ends, with H.265 compression
+        ffmpeg_command = (
+            f"ffmpeg -y -stream_loop -1 -i {video_path} -i {audio_path} "
+            f"-c:v copy -crf 28 -c:a aac -shortest {output_path}"
+        )
+        process = await asyncio.create_subprocess_shell(
+            ffmpeg_command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+
+        if process.returncode != 0:
+            print(f"FFmpeg error: {stderr.decode()}")
+            return None
+
+        # Read merged video
+        with open(output_path, "rb") as f:
+            result = f.read()
+
+        # Clean up temporary files
+        os.remove(video_path)
+        os.remove(audio_path)
+        os.remove(output_path)
+
+        return result
+    except Exception as e:
+        print(f"Error downloading Coub video: {e}")
+        return None
+
+
 def bot_was_mentioned(update: Update) -> bool:
     """
     Проверяет, упомянут ли бот в сообщении (через @BOT_USERNAME).
@@ -200,26 +308,25 @@ async def handle_mentions(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     #    is_big=False
     #)
     try:
-        if "tiktok.com" in url.lower():            
+        video_data = None
+        print(f"Скачиваем видео {url}")
+        
+        if "coub.com" in url.lower():
+            video_data = await download_coub_video(url)
+        elif "tiktok.com" in url.lower():
             video_data = await download_tiktok_video(url)
-            if not video_data:
-                await message.reply_text("Ошибка при скачивании или видео недоступно.")
-                return
-            await message.reply_video(
-                video=video_data                
-            )
-        elif "youtube.com" in url.lower() or "youtu.be" in url.lower():            
+        elif "youtube.com" in url.lower() or "youtu.be" in url.lower():  
             video_data = await download_youtube_shorts(url)
-            if video_data is None:
-                await message.reply_text(
-                    "Видео слишком длинное (более 1 минуты) или произошла ошибка."
-                )
-                return
-            await message.reply_video(
-                video=video_data            
-            )
         else:
-            await message.reply_text("Я умею скачивать только TikTok и YouTube Shorts!")
+            await message.reply_text("Я умею скачивать только Coub, TikTok и YouTube Shorts!")
+            return
+
+        if not video_data:
+            await message.reply_text("Анлак, не получилось скачать видео")
+            return
+            
+        print(f"Отправляем видео {url}")
+        await message.reply_video(video=video_data)
     except Exception as e:
         print(f"Ошибка в процессе /download: {e}")
         await message.reply_text("Произошла ошибка. Попробуйте ещё раз позже.")
@@ -249,7 +356,7 @@ async def handle_other_messages(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).read_timeout(60).write_timeout(60).build()
     
     # Команды
     #app.add_handler(CommandHandler("start", start_command))
