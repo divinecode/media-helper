@@ -29,8 +29,9 @@ def resolve_tiktok_url(short_url: str) -> str:
     """
     Разрешает короткую ссылку TikTok и возвращает полный URL.
     """
+    print(f"Обнаружена короткая ссылка: {short_url}")
     try:
-        response = requests.head(short_url, allow_redirects=True, timeout=10)
+        response = requests.head(short_url, allow_redirects=True, timeout=10)    
         return response.url
     except Exception as e:
         print(f"Ошибка при разрешении короткой ссылки: {e}")
@@ -41,9 +42,12 @@ def extract_video_id(tiktok_url: str) -> str | None:
     Извлекает ID видео из полной ссылки TikTok.
     Возвращает ID видео или None, если ID не найден.
     """
+    print(f"Пытаюсь получить ID из: {tiktok_url}")
     match = TIKTOK_VIDEO_ID_REGEX.search(tiktok_url)
     if match:
+        print(f"Получил: {match.group(1)}")
         return match.group(1)
+    pring(f"Не получилось извлечь ID")
     return None
 
 async def download_tiktok_video(tiktok_url: str) -> bytes | None:
