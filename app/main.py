@@ -94,6 +94,7 @@ async def download_youtube_shorts(url: str) -> bytes | None:
             'skip_download': True,
             'simulate': True,  
             'cookies': cookies_file,
+            'proxy': 'socks5://208.102.51.6:58208'
         }
         with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -108,6 +109,7 @@ async def download_youtube_shorts(url: str) -> bytes | None:
             'no_warnings': True,            
             'outtmpl': 'temp_video.%(ext)s',          
             'cookies': cookies_file,
+            'proxy': 'socks5://208.102.51.6:58208',
             'format': 'bestvideo+bestaudio/best',  # Максимальное качество
             'merge_output_format': 'mp4',          # Объединить в mp4            
             'postprocessors': [{
