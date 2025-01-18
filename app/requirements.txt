@@ -1,0 +1,10 @@
+python-telegram-bot
+requests==2.31.0
+curl-cffi==0.8.1b9
+yt-dlp==2025.01.15
+telegram
+urllib3>=1.26.17
+pytz
+APScheduler
+pytelegrambotapi
+static-ffmpeg
