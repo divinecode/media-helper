@@ -15,6 +15,7 @@ from telebot.types import ReactionTypeEmoji
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "")
+YTPROXY = os.evniron.get("YT_PROXY", "socks5://5.183.70.46:1080")
 
 ALLOWED_USERNAMES = os.environ.get("ALLOWED_USERNAMES", "")
 ALLOWED_USERNAMES = [u.strip() for u in ALLOWED_USERNAMES.split(",") if u.strip()]
@@ -94,7 +95,7 @@ async def download_youtube_shorts(url: str) -> bytes | None:
             'skip_download': True,
             'simulate': True,  
             'cookies': cookies_file,
-            'proxy': 'socks5://208.102.51.6:58208'
+            'proxy': YTPROXY
         }
         with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -109,7 +110,7 @@ async def download_youtube_shorts(url: str) -> bytes | None:
             'no_warnings': True,            
             'outtmpl': 'temp_video.%(ext)s',          
             'cookies': cookies_file,
-            'proxy': 'socks5://208.102.51.6:58208',
+            'proxy': YTPROXY,
             'format': 'bestvideo+bestaudio/best',  # Максимальное качество
             'merge_output_format': 'mp4',          # Объединить в mp4            
             'postprocessors': [{
