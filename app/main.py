@@ -22,6 +22,8 @@ ALLOWED_USERNAMES = [u.strip() for u in ALLOWED_USERNAMES.split(",") if u.strip(
 TIKTOK_LINK_REGEX = re.compile(r"https?://(?:vt\.)?(?:www\.)?tiktok\.com/[\w\-/.@]+")
 TIKTOK_VIDEO_ID_REGEX = re.compile(r"/video/(\d+)")
 
+cookies_file = 'cookies.txt'
+
 def resolve_tiktok_url(short_url: str) -> str:
     """
     Разрешает короткую ссылку TikTok и возвращает полный URL.
@@ -103,7 +105,8 @@ async def download_youtube_shorts(url: str) -> bytes | None:
         ydl_opts_download = {
             'quiet': True,
             'no_warnings': True,            
-            'outtmpl': 'temp_video.%(ext)s',            
+            'outtmpl': 'temp_video.%(ext)s',          
+            'cookies': cookies_file,
             'format': 'bestvideo+bestaudio/best',  # Максимальное качество
             'merge_output_format': 'mp4',          # Объединить в mp4            
             'postprocessors': [{
