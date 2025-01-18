@@ -4,6 +4,7 @@ curl-cffi==0.8.1b9
 yt-dlp==2025.01.15
 telegram
 urllib3>=1.26.17
+aiohttp>=3.11.11
 pytz
 APScheduler
 pytelegrambotapi
