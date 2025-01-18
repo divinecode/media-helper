@@ -15,7 +15,7 @@ from telebot.types import ReactionTypeEmoji
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "")
-YTPROXY = os.evniron.get("YT_PROXY", "socks5://5.183.70.46:1080")
+YTPROXY = os.environ.get("YT_PROXY", "socks5://5.183.70.46:1080")
 
 ALLOWED_USERNAMES = os.environ.get("ALLOWED_USERNAMES", "")
 ALLOWED_USERNAMES = [u.strip() for u in ALLOWED_USERNAMES.split(",") if u.strip()]
