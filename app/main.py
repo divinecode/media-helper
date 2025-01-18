@@ -22,6 +22,7 @@ ALLOWED_USERNAMES = [u.strip() for u in ALLOWED_USERNAMES.split(",") if u.strip(
 
 TIKTOK_LINK_REGEX = re.compile(r"https?://(?:vt\.)?(?:www\.)?tiktok\.com/[\w\-/.@]+")
 TIKTOK_VIDEO_ID_REGEX = re.compile(r"/video/(\d+)")
+TIKTOK_SHORT_LINK_REGEX = re.compile(r"https?://(?!www\.)[a-zA-Z0-9_-]+\.(?:tiktok|douyin)\.com")
 
 cookies_file = 'cookies.txt'
 
@@ -55,8 +56,9 @@ async def download_tiktok_video(tiktok_url: str) -> bytes | None:
     Скачивает видео с TikTok через tikcdn.io, поддерживая укороченные и полные ссылки.
     Возвращает байты видео или None в случае ошибки.
     """
+    match = TIKTOK_SHORT_LINK_REGEX.search(tiktok_url)
     try:
-        if "vt.tiktok.com" in tiktok_url:
+        if match:
             tiktok_url = resolve_tiktok_url(tiktok_url)
             if not tiktok_url:
                 print("Не удалось разрешить короткую ссылку.")
