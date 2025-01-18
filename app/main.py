@@ -92,7 +92,8 @@ async def download_youtube_shorts(url: str) -> bytes | None:
             'quiet': True,
             'no_warnings': True,
             'skip_download': True,
-            'simulate': True,            
+            'simulate': True,  
+            'cookies': cookies_file,
         }
         with yt_dlp.YoutubeDL(ydl_opts_info) as ydl:
             info = ydl.extract_info(url, download=False)
