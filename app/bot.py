@@ -2,12 +2,8 @@ import re
 import asyncio
 import logging
 from typing import List
+from telegram.ext import ContextTypes
 from telegram import Update
-from telegram.ext import (
-    MessageHandler,
-    ContextTypes,
-    filters
-)
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -15,12 +11,11 @@ logger = logging.getLogger(__name__)
 class VideoDownloadBot:
     def __init__(self, config: Config):
         self.config = config
-        self.downloaders = []  # Will be initialized later
+        self.downloaders = []
         
     async def initialize(self):
-        # Create temp directory if it doesn't exist
         self.config.temp_dir.mkdir(exist_ok=True)
-        # Initialize downloaders after temp dir is created
+
         from downloaders.tiktok import TikTokDownloader
         from downloaders.youtube import YouTubeShortsDownloader
         from downloaders.coub import CoubDownloader
@@ -57,13 +52,13 @@ class VideoDownloadBot:
                     
                 urls = self._extract_urls(message.text)
                 if not urls:
-                    await message.reply_text("Анлак, в твоем сообщении нет ссылок.")
+                    await message.reply_text("Анлак, в твоём сообщении нет ссылок.")
                     return
                     
                 url = urls[0]  # Process first URL only
                 
                 # Send acknowledgment message
-                status_message = await message.reply_text("Воу, воу... работяги добывают видео, подождите, пожалуйста.")
+                status_message = await message.reply_text("Воу-воу... Работяги добывают видео, подождите, пожалуйста.")
                 
                 # Find appropriate downloader
                 downloader = next((d for d in self.downloaders if d.can_handle(url)), None)
@@ -93,15 +88,8 @@ class VideoDownloadBot:
                     return
                     
                 try:
-                    await status_message.edit_text("Опааа, работяги завершили работы. Грузим видео в сообщение...")
-                    # First send the video
-                    await message.reply_video(
-                        video=video_data,
-                        read_timeout=self.config.read_timeout,
-                        write_timeout=self.config.write_timeout,
-                        connect_timeout=self.config.connect_timeout
-                    )
-                    # Only delete status message after successful video send
+                    await status_message.edit_text("Опаааа! Работяги завершили работу. Грузим видео в сообщение...")
+                    await message.reply_video(video=video_data)
                     await status_message.delete()
                 except Exception as e:
                     logger.error(f"Error sending video: {e}")

@@ -2,3 +2,4 @@ python-telegram-bot==21.10
 requests==2.31.0
 yt-dlp==2025.1.15
 aiohttp==3.11.11
+telegram
