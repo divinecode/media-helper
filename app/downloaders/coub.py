@@ -1,7 +1,7 @@
 import re
 import asyncio
 import logging
-from typing import Optional, Dict
+from typing import Optional, List, Tuple, Dict
 import aiohttp
 from pathlib import Path
 from downloaders.base import VideoDownloader
@@ -16,7 +16,7 @@ class CoubDownloader(VideoDownloader):
     def can_handle(self, url: str) -> bool:
         return bool(self.LINK_REGEX.search(url))
     
-    async def download(self, url: str) -> Optional[DownloadResult]:
+    async def download(self, url: str) -> Optional[List[DownloadResult]]:
         try:
             coub_data = await self._fetch_coub_data(url)
             if not coub_data or not coub_data.get("file_versions"):
@@ -53,11 +53,11 @@ class CoubDownloader(VideoDownloader):
             # Cleanup
             await self._cleanup_temp_files(temp_video, temp_audio, temp_output)
             
-            return DownloadResult(
+            return [DownloadResult(
                 data=result_data,
                 media_type=MediaType.VIDEO,
                 caption=coub_data.get('title')  # Add Coub title as caption
-            )
+            )]
             
         except Exception as e:
             logger.error(f"Error downloading Coub video: {e}")
