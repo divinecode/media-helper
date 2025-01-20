@@ -29,12 +29,10 @@ class TikTokDownloader(VideoDownloader):
                 
             # First try the API method
             video_data = await self._download_via_api(video_id)
-            if video_data:
-                return video_data
+            if not video_data:
+                return None
                 
-            # Fallback to direct download if API fails
-            return await self._download_direct(url)
-            
+            return video_data
         except Exception as e:
             logger.error(f"Error downloading TikTok video: {e}")
             return None
@@ -65,20 +63,10 @@ class TikTokDownloader(VideoDownloader):
                 async with session.get(download_url, headers=headers) as response:
                     if response.status == 200:
                         return await response.read()
+                    else:
+                        logger.error(f"API download failed, status {response.status} with text \"{await response.text()}\"")
             return None
             
         except Exception as e:
             logger.error(f"API download failed: {e}")
-            return None
-            
-    async def _download_direct(self, url: str) -> Optional[bytes]:
-        """Fallback method - direct download attempt"""
-        try:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36",
-                "Referer": "https://www.tiktok.com/"
-            }
-            return await self._download_file(url, headers=headers)
-        except Exception as e:
-            logger.error(f"Direct download failed: {e}")
             return None
