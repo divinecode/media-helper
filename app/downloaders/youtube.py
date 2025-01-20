@@ -1,5 +1,5 @@
 import logging
-from typing import Optional, List, Tuple, Dict
+from typing import Any, Optional, List, Tuple, Dict
 import yt_dlp
 from pathlib import Path
 from downloaders.base import VideoDownloader
