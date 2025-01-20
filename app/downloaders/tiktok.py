@@ -5,6 +5,7 @@ from typing import Optional, Dict, Any
 from bs4 import BeautifulSoup
 import aiohttp
 from downloaders.base import VideoDownloader
+from downloaders.types import DownloadResult, MediaType
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +17,7 @@ class TikTokDownloader(VideoDownloader):
     def can_handle(self, url: str) -> bool:
         return bool(self.LINK_REGEX.search(url) or self.SHORT_LINK_REGEX.search(url))
     
-    async def download(self, url: str) -> Optional[bytes]:
+    async def download(self, url: str) -> Optional[DownloadResult]:
         try:
             if self.SHORT_LINK_REGEX.search(url):
                 url = await self._resolve_short_url(url)
@@ -27,7 +28,10 @@ class TikTokDownloader(VideoDownloader):
             # First try the new download method
             video_data = await self._download_via_tikdownloader(url)
             if video_data:
-                return video_data
+                return DownloadResult(
+                    data=video_data,
+                    media_type=MediaType.VIDEO
+                )
                 
             # If new method fails, try the old API method
             video_id = self._extract_video_id(url)
@@ -39,7 +43,10 @@ class TikTokDownloader(VideoDownloader):
             if not video_data:
                 return None
                 
-            return video_data
+            return DownloadResult(
+                data=video_data,
+                media_type=MediaType.VIDEO
+            )
             
         except Exception as e:
             logger.error(f"Error downloading TikTok video: {e}")

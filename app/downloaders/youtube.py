@@ -3,6 +3,7 @@ from typing import Optional, Dict, Any
 import yt_dlp
 from pathlib import Path
 from downloaders.base import VideoDownloader
+from downloaders.types import MediaType, DownloadResult
 
 logger = logging.getLogger(__name__)
 
@@ -12,7 +13,7 @@ class YouTubeShortsDownloader(VideoDownloader):
     def can_handle(self, url: str) -> bool:
         return "youtube.com" in url.lower() or "youtu.be" in url.lower()
     
-    async def download(self, url: str) -> Optional[bytes]:
+    async def download(self, url: str) -> Optional[DownloadResult]:
         try:
             # First check video duration and get info
             video_info = await self._get_video_info(url)
@@ -28,7 +29,11 @@ class YouTubeShortsDownloader(VideoDownloader):
             if not video_data:
                 return None
                 
-            return video_data
+            return DownloadResult(
+                data=video_data,
+                media_type=MediaType.VIDEO,
+                caption=video_info.get('title')  # Add video title as caption
+            )
             
         except Exception as e:
             logger.error(f"Error downloading YouTube video: {e}")

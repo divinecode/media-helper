@@ -1,8 +1,9 @@
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Optional, List, Union
 import aiohttp
 import logging
 from config import Config
+from downloaders.types import DownloadResult
 
 logger = logging.getLogger(__name__)
 
@@ -11,7 +12,7 @@ class VideoDownloader(ABC):
         self.config = config
         
     @abstractmethod
-    async def download(self, url: str) -> Optional[bytes]:
+    async def download(self, url: str) -> Optional[Union[bytes, List[DownloadResult]]]:
         pass
     
     @abstractmethod

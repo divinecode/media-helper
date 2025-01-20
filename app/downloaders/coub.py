@@ -5,6 +5,7 @@ from typing import Optional, Dict
 import aiohttp
 from pathlib import Path
 from downloaders.base import VideoDownloader
+from downloaders.types import MediaType, DownloadResult
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +16,7 @@ class CoubDownloader(VideoDownloader):
     def can_handle(self, url: str) -> bool:
         return bool(self.LINK_REGEX.search(url))
     
-    async def download(self, url: str) -> Optional[bytes]:
+    async def download(self, url: str) -> Optional[DownloadResult]:
         try:
             coub_data = await self._fetch_coub_data(url)
             if not coub_data or not coub_data.get("file_versions"):
@@ -47,12 +48,16 @@ class CoubDownloader(VideoDownloader):
             
             # Read result
             with open(temp_output, "rb") as f:
-                result = f.read()
+                result_data = f.read()
             
             # Cleanup
             await self._cleanup_temp_files(temp_video, temp_audio, temp_output)
             
-            return result
+            return DownloadResult(
+                data=result_data,
+                media_type=MediaType.VIDEO,
+                caption=coub_data.get('title')  # Add Coub title as caption
+            )
             
         except Exception as e:
             logger.error(f"Error downloading Coub video: {e}")

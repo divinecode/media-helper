@@ -3,4 +3,5 @@ requests==2.31.0
 yt-dlp==2025.1.15
 aiohttp==3.11.11
 beautifulsoup4>=4.12.3
+instaloader>=4.14
 telegram
