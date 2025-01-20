@@ -1,11 +1,4 @@
-python-telegram-bot
+python-telegram-bot==21.10
 requests==2.31.0
-curl-cffi==0.8.1b9
-yt-dlp==2025.01.15
-telegram
-urllib3>=1.26.17
-aiohttp>=3.11.11
-pytz
-APScheduler
-pytelegrambotapi
-static-ffmpeg
+yt-dlp==2025.1.15
+aiohttp==3.11.11
