@@ -3,7 +3,7 @@ from typing import Optional, List, Union
 import aiohttp
 import logging
 from config import Config
-from downloaders.types import DownloadResult
+from media_types import DownloadResult
 
 logger = logging.getLogger(__name__)
 

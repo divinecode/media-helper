@@ -5,7 +5,7 @@ from typing import Optional, List, Tuple, Dict
 import aiohttp
 from pathlib import Path
 from downloaders.base import VideoDownloader
-from downloaders.types import MediaType, DownloadResult
+from media_types import MediaType, DownloadResult
 
 logger = logging.getLogger(__name__)
 

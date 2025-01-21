@@ -3,7 +3,7 @@ from typing import Any, Optional, List, Tuple, Dict
 import yt_dlp
 from pathlib import Path
 from downloaders.base import VideoDownloader
-from downloaders.types import MediaType, DownloadResult
+from media_types import MediaType, DownloadResult
 
 logger = logging.getLogger(__name__)
 

@@ -4,7 +4,7 @@ from typing import Optional, List, Tuple, Dict
 from pathlib import Path
 import instaloader
 from downloaders.base import VideoDownloader
-from downloaders.types import DownloadResult, MediaType
+from media_types import DownloadResult, MediaType
 from config import Config
 
 logger = logging.getLogger(__name__)

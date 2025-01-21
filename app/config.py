@@ -1,20 +1,43 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List
 from pathlib import Path
 
 @dataclass
+class CompressionConfig:
+    # Video compression settings
+    max_telegram_size_mb: int = 45
+    max_compress_size_mb: int = 100
+    
+    # First pass compression (high quality)
+    first_pass_crf: int = 28
+    first_pass_scale: int = 1080
+    first_pass_preset: str = "fast"
+    first_pass_audio_bitrate: int = 128
+    
+    # Second pass compression (if first pass file is still too large)
+    second_pass_crf: int = 32
+    second_pass_scale: int = 720
+    second_pass_preset: str = "faster"
+    second_pass_audio_bitrate: int = 96
+
+@dataclass
 class Config:
-    # Bot settings
+    # Required parameters (no defaults)
     bot_token: str
     bot_username: str
     allowed_usernames: List[str]
-    
-    # Download settings
     yt_proxy: str
     cookies_file: Path
     temp_dir: Path
-    download_timeout: int = 90  # seconds
+    
+    # Optional parameters (with defaults)
+    # Multi-user settings
+    max_concurrent_downloads: int = 20
+    max_downloads_per_user: int = 3
+    
+    # Download settings
+    download_timeout: int = 90
     
     # Telegram API timeouts
     read_timeout: int = 120
@@ -25,13 +48,33 @@ class Config:
     # Connection settings
     connection_pool_size: int = 8
     
+    # Compression settings
+    compression: CompressionConfig = field(default_factory=CompressionConfig)
+    
     @classmethod
     def from_env(cls) -> 'Config':
+        compression = CompressionConfig(
+            max_telegram_size_mb=int(os.getenv("MAX_TELEGRAM_SIZE_MB", "45")),
+            max_compress_size_mb=int(os.getenv("MAX_COMPRESS_SIZE_MB", "100")),
+            first_pass_crf=int(os.getenv("FIRST_PASS_CRF", "28")),
+            first_pass_scale=int(os.getenv("FIRST_PASS_SCALE", "1080")),
+            first_pass_preset=os.getenv("FIRST_PASS_PRESET", "fast"),
+            first_pass_audio_bitrate=int(os.getenv("FIRST_PASS_AUDIO_BITRATE", "128")),
+            second_pass_crf=int(os.getenv("SECOND_PASS_CRF", "32")),
+            second_pass_scale=int(os.getenv("SECOND_PASS_SCALE", "720")),
+            second_pass_preset=os.getenv("SECOND_PASS_PRESET", "faster"),
+            second_pass_audio_bitrate=int(os.getenv("SECOND_PASS_AUDIO_BITRATE", "96")),
+        )
+        
         return cls(
             # Bot settings
             bot_token=os.getenv("BOT_TOKEN", ""),
             bot_username=os.getenv("BOT_USERNAME", ""),
             allowed_usernames=[u.strip() for u in os.getenv("ALLOWED_USERNAMES", "").split(",") if u.strip()],
+            
+            # Multi-user settings
+            max_concurrent_downloads=int(os.getenv("MAX_CONCURRENT_DOWNLOADS", "20")),
+            max_downloads_per_user=int(os.getenv("MAX_DOWNLOADS_PER_USER", "3")),
             
             # Download settings
             yt_proxy=os.getenv("YT_PROXY", ""),
@@ -47,4 +90,7 @@ class Config:
             
             # Connection settings
             connection_pool_size=int(os.getenv("CONNECTION_POOL_SIZE", "8")),
+            
+            # Compression settings
+            compression=compression,
         )
