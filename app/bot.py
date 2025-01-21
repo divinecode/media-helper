@@ -8,20 +8,23 @@ from dataclasses import dataclass
 from temp_manager import TempManager
 from media_types import MediaType, MediaItem
 from video_processor import VideoProcessor
+from config import Config
 from telegram.ext import ContextTypes
-from telegram import Update, InputMediaPhoto, InputMediaVideo
+from telegram import Update, InputMediaPhoto, InputMediaVideo, Message
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
 class VideoDownloadBot:
-    def __init__(self, config: 'Config'):
+    def __init__(self, config: Config):
         self.config = config
         self.temp_manager = TempManager(config.temp_dir)
         self.video_processor = VideoProcessor(config, self.temp_manager)
         self.downloaders = []
-        self.MAX_TELEGRAM_SIZE_MB = 45
-        self.MAX_COMPRESS_SIZE_MB = 100
+        
+        # Use compression config values instead of hardcoded ones
+        self.MAX_TELEGRAM_SIZE_MB = config.compression.max_telegram_size_mb
+        self.MAX_COMPRESS_SIZE_MB = config.compression.max_compress_size_mb
         
         # Add concurrency control
         self.download_semaphore = asyncio.Semaphore(config.max_concurrent_downloads)
@@ -30,6 +33,9 @@ class VideoDownloadBot:
         self.active_downloads: Dict[int, Set[asyncio.Task]] = {}
         self.user_semaphores: Dict[int, asyncio.Semaphore] = {}
         self.max_downloads_per_user = config.max_downloads_per_user
+        
+        # Add a task manager for message processing
+        self.message_tasks: Dict[int, Set[asyncio.Task]] = {}
         
     def get_user_semaphore(self, user_id: int) -> asyncio.Semaphore:
         """Get or create a semaphore for a specific user."""
@@ -80,7 +86,7 @@ class VideoDownloadBot:
         logger.debug(f"Initialized {len(self.downloaders)} downloaders")
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle incoming message."""
+        """Handle incoming message with non-blocking concurrent processing."""
         if not update.effective_user or not self._bot_was_mentioned(update):
             return
             
@@ -101,17 +107,23 @@ class VideoDownloadBot:
                 reply_to_message_id=message.message_id
             )
             return
-            
-        # Get user's semaphore
-        user_sem = self.get_user_semaphore(user_id)
         
-        # Create and track the download task
-        download_task = asyncio.create_task(
+        # Create a new task for processing the message
+        process_task = asyncio.create_task(
             self._process_download(user_id, urls[0], message)
         )
-        await self.track_user_download(user_id, download_task)
         
-    async def _process_download(self, user_id: int, url: str, message: 'telegram.Message'):
+        # Add task to user's task set
+        if user_id not in self.message_tasks:
+            self.message_tasks[user_id] = set()
+        self.message_tasks[user_id].add(process_task)
+        
+        # Set up task cleanup callback
+        process_task.add_done_callback(
+            lambda t: self._cleanup_task(user_id, t)
+        )
+        
+    async def _process_download(self, user_id: int, url: str, message: Message):
         """Process a single download request."""
         try:
             user_sem = self.get_user_semaphore(user_id)
@@ -128,7 +140,7 @@ class VideoDownloadBot:
                 reply_to_message_id=message.message_id
             )
             
-    async def _handle_download(self, user_id: int, url: str, message: 'telegram.Message'):
+    async def _handle_download(self, user_id: int, url: str, message: Message):
         """Handle the actual download process."""
         status_message = await message.reply_text(
             "Воу-воу... Работяги добывают контент, подождите, пожалуйста.",
@@ -204,30 +216,44 @@ class VideoDownloadBot:
 
     async def _process_media(
         self,
-        media_item: 'MediaItem',
-        status_message: 'telegram.Message',
+        media_item: MediaItem,
+        status_message: Message,
         user_id: int
     ) -> Optional[bytes]:
-        """Process a single media item, compressing if necessary."""
+        """Process a single media item, applying compression based on configuration."""
         if media_item.media_type != MediaType.VIDEO:
             return media_item.data
 
         size_mb = media_item.size_mb
         logger.debug(f"Processing video for user {user_id}, initial size: {size_mb:.2f}MB")
 
-        if size_mb > self.MAX_TELEGRAM_SIZE_MB:
-            if size_mb > self.MAX_COMPRESS_SIZE_MB:
-                await status_message.edit_text(
-                    f"Анлак, видео слишком большое ({size_mb:.1f}MB) для обработки. "
-                    "Выбери видео поменьше."
-                )
-                return None
+        # Check size limits first
+        if size_mb > self.MAX_COMPRESS_SIZE_MB:
+            await status_message.edit_text(
+                f"Анлак, видео слишком большое ({size_mb:.1f}MB) для обработки. "
+                "Выбери видео поменьше."
+            )
+            return None
 
-            await status_message.edit_text(f"Сжимаем видео размером {size_mb:.1f}MB...")
+        # Check if we need compression
+        needs_compression = (
+            size_mb > self.config.compression.default_compress_threshold_mb or 
+            size_mb > self.MAX_TELEGRAM_SIZE_MB
+        )
+
+        if needs_compression:
+            compression_msg = "Применяем сжатие видео..."
+            if size_mb > self.MAX_TELEGRAM_SIZE_MB:
+                compression_msg = f"Сжимаем большое видео размером {size_mb:.1f}MB..."
+            await status_message.edit_text(compression_msg)
+
+            # Apply compression with force_compress for videos above threshold
+            force_compress = size_mb > self.config.compression.default_compress_threshold_mb
             compressed_data = await self.video_processor.compress_video(
                 media_item.data,
                 self.MAX_TELEGRAM_SIZE_MB,
-                user_id
+                user_id,
+                force_compress=force_compress
             )
             
             if not compressed_data:
@@ -246,16 +272,20 @@ class VideoDownloadBot:
                 )
                 return None
                 
-            await status_message.edit_text("Сжатие завершено, готовим к отправке...")
-            return compressed_data
+            if compressed_size < size_mb:
+                await status_message.edit_text("Сжатие завершено, готовим к отправке...")
+                return compressed_data
+            else:
+                logger.debug("Compression didn't reduce file size, using original")
+                return media_item.data
 
         return media_item.data
 
     async def _send_media_group(
         self,
-        message: 'telegram.Message',
-        media_items: List['MediaItem'],
-        status_message: 'telegram.Message',
+        message: Message,
+        media_items: List[MediaItem],
+        status_message: Message,
         user_id: int
     ) -> bool:
         """Send multiple media items as a group."""
@@ -311,11 +341,34 @@ class VideoDownloadBot:
         """Extract URLs from message text."""
         return re.findall(r'(https?://\S+)', text)
 
+    def _cleanup_task(self, user_id: int, task: asyncio.Task) -> None:
+        """Remove completed task from tracking."""
+        if user_id in self.message_tasks:
+            self.message_tasks[user_id].discard(task)
+            if not self.message_tasks[user_id]:
+                del self.message_tasks[user_id]
+                
+    async def cancel_user_downloads(self, user_id: int) -> None:
+        """Cancel all active downloads for a user."""
+        if user_id in self.message_tasks:
+            tasks = self.message_tasks[user_id]
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            del self.message_tasks[user_id]
+
     async def cleanup(self):
         """Clean up resources when shutting down."""
-        # Cancel all active downloads
-        for user_id in list(self.active_downloads.keys()):
-            await self.cancel_user_downloads(user_id)
+        # Cancel all active tasks
+        all_tasks = []
+        for user_id in list(self.message_tasks.keys()):
+            all_tasks.extend(self.message_tasks[user_id])
+            
+        for task in all_tasks:
+            task.cancel()
+            
+        if all_tasks:
+            await asyncio.gather(*all_tasks, return_exceptions=True)
             
         # Clean up all temporary directories
         self.temp_manager.cleanup_all_temp_dirs()
