@@ -48,15 +48,11 @@ class TikTokDownloader(VideoDownloader):
                     logger.error("Failed to resolve short URL")
                     return None
 
-            # Try the new download method first
+            # Try tikdownloader.io method
             logger.debug("Attempting download via tikdownloader.io")
-            video_data = await self._download_via_tikdownloader(url)
-            if video_data:
-                logger.debug("Successfully downloaded video via tikdownloader.io")
-                return [DownloadResult(
-                    data=video_data,
-                    media_type=MediaType.VIDEO
-                )]
+            results = await self._download_via_tikdownloader(url)
+            if results:
+                return results
 
             # Fallback to old API method
             logger.debug("Tikdownloader method failed, falling back to API method")
@@ -69,12 +65,6 @@ class TikTokDownloader(VideoDownloader):
             if not video_data:
                 return None
                 
-            # Log file details for debugging Telegram upload issues
-            size_mb = len(video_data) / (1024 * 1024)
-            logger.info(f"Downloaded video size: {size_mb:.2f} MB")
-            if size_mb > 50:
-                logger.warning(f"Video size ({size_mb:.2f} MB) exceeds Telegram's recommended limit of 50 MB")
-
             return [DownloadResult(
                 data=video_data,
                 media_type=MediaType.VIDEO
@@ -84,191 +74,167 @@ class TikTokDownloader(VideoDownloader):
             logger.error(f"Error downloading TikTok video: {e}", exc_info=True)
             return None
 
-    async def _download_via_tikdownloader(self, url: str) -> Optional[bytes]:
-        """Download video using tikdownloader.io service."""
+    async def _download_via_tikdownloader(self, url: str) -> Optional[List[DownloadResult]]:
+        """Download content using tikdownloader.io service."""
         try:
             logger.debug("Starting download via tikdownloader.io")
             async with aiohttp.ClientSession() as session:
-                # Get download information
-                download_infos = await self._get_download_info(url, session)
-                if not download_infos:
-                    logger.debug("No download information found")
+                html_data = await self._fetch_tikdownloader_data(url, session)
+                if not html_data:
                     return None
 
-                # Try each download URL
-                for download_info in download_infos:
-                    try:
-                        logger.debug(f"Attempting download from URL: {download_info.download_url}")
-                        async with session.get(
-                            download_info.download_url,
-                            headers=download_info.headers,
-                            timeout=30
-                        ) as response:
-                            if response.status == 200:
-                                content_type = response.headers.get('Content-Type', 'unknown')
-                                content_length = response.headers.get('Content-Length', 'unknown')
-                                logger.debug(f"Download response headers - Content-Type: {content_type}, Content-Length: {content_length}")
-                                
-                                video_data = await response.read()
-                                size_mb = len(video_data) / (1024 * 1024)
-                                logger.debug(f"Successfully downloaded video, size: {size_mb:.2f} MB")
-                                return video_data
-                            logger.debug(f"Download failed with status: {response.status}")
-                    except Exception as e:
-                        logger.debug(f"Error downloading from URL: {e}", exc_info=True)
-                        continue
+                results = []
+                soup = BeautifulSoup(html_data, "html.parser")
+                logger.debug("Parsing HTML for content downloads")
 
-                return None
+                # First try to get video download links
+                video_links = self._parse_download_links(html_data)
+                if video_links:
+                    await self._try_download_video(session, video_links[0], results)
+                else:
+                    # If no video, try to get both audio and photos as they usually come together
+                    logger.debug("No video links found, trying to find audio and photos")
+                    
+                    # Try to get photos first
+                    await self._try_download_photos(session, soup, results)
+                    
+                    # Then try to get music from dl-action section
+                    music_link = soup.find("div", class_="dl-action").find("a", attrs={
+                        "class": "tik-button-dl button dl-success",
+                        "href": lambda h: h and "dl.snapcdn.app/get" in h
+                    })
+
+                    if music_link and music_link.get("href"):
+                        logger.debug(f"Found music link: {music_link['href']}")
+                        await self._try_download_music(session, music_link["href"], results)
+                    else:
+                        logger.debug("No music link found in the dl-action section")
+
+                return results if results else None
 
         except Exception as e:
             logger.error(f"Error in tikdownloader method: {e}", exc_info=True)
             return None
 
-    async def _get_download_info(self, url: str, session: aiohttp.ClientSession) -> Optional[List[DownloadInfo]]:
-        """Get download information from tikdownloader.io."""
-        try:
-            data = urlencode({"q": url, "lang": "en"})
-            
-            logger.debug(f"Making request to tikdownloader.io API with data: {data}")
-            logger.debug(f"Request headers: {json.dumps(self.headers, indent=2)}")
-            
-            async with session.post(
-                "https://tikdownloader.io/api/ajaxSearch",
-                headers=self.headers,
-                data=data
-            ) as response:
-                logger.debug(f"Received response with status: {response.status}")
-                if response.status != 200:
-                    logger.error(f"Failed to get download info: {response.status}")
-                    response_text = await response.text()
-                    logger.debug(f"Error response body: {response_text}")
-                    return None
-
-                response_data = await response.json()
-                if response_data.get("status") != "ok":
-                    logger.error("Invalid response from tikdownloader API")
-                    return None
-
-                return self._parse_download_links(response_data["data"])
-
-        except Exception as e:
-            logger.error(f"Error getting download info: {e}", exc_info=True)
-            return None
-
-    def _parse_download_links(self, html_content: str) -> List[DownloadInfo]:
-        """Parse download links from HTML content."""
-        logger.debug("Starting to parse download links from HTML content")
-        soup = BeautifulSoup(html_content, "html.parser")
-        download_links = []
-
-        for link in soup.find_all("a", class_="tik-button-dl"):
-            href = link.get("href")
-            if not href or "#" in href:
-                continue
-
-            link_text = link.get_text().strip().lower()
-            download_info = DownloadInfo(
-                download_url=href,
-                headers=self.headers
-            )
-            
-            if "hd" in link_text:
-                download_links.insert(0, download_info)
-            elif "mp4" in link_text and "convert" not in link.get("class", []):
-                download_links.append(download_info)
-
-        logger.debug(f"Found {len(download_links)} download links")
-        return download_links
-
-    async def _handle_video_conversion(
+    async def _try_download_video(
         self,
         session: aiohttp.ClientSession,
-        convert_data: Dict[str, Any]
-    ) -> Optional[str]:
-        """Handle video conversion process."""
+        link_info: DownloadInfo,
+        results: List[DownloadResult]
+    ) -> None:
+        """Try to download video content."""
         try:
-            async with session.post(
-                "https://s1.tik-cdn.com/api/json/convert",
-                headers=self.headers,
-                data=convert_data,
+            logger.debug(f"Attempting video download from URL: {link_info.download_url}")
+            async with session.get(
+                link_info.download_url,
+                headers=link_info.headers,
                 timeout=30
-            ) as convert_response:
-                logger.debug(f"Conversion response status: {convert_response.status}")
-                if convert_response.status != 200:
-                    response_text = await convert_response.text()
-                    logger.debug(f"Conversion error response: {response_text}")
-                    return None
+            ) as response:
+                if response.status == 200:
+                    video_data = await response.read()
+                    results.append(DownloadResult(
+                        data=video_data,
+                        media_type=MediaType.VIDEO
+                    ))
+        except Exception as e:
+            logger.debug(f"Video download failed: {e}")
 
-                convert_result = await convert_response.json()
-                logger.debug(f"Conversion result: {json.dumps(convert_result, indent=2)}")
-                if convert_result.get("status") != "success":
-                    return None
+    async def _try_download_music(
+        self,
+        session: aiohttp.ClientSession,
+        url: str,
+        results: List[DownloadResult]
+    ) -> None:
+        """Try to download music content."""
+        try:
+            headers = {
+                "User-Agent": self.headers["User-Agent"],
+                "Accept": "*/*",
+                "Referer": "https://tikdownloader.io/",
+                "Origin": "https://tikdownloader.io",
+                "Connection": "keep-alive",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "cross-site",
+            }
+            logger.debug(f"Attempting music download from URL: {url}")
+            async with session.get(url, headers=headers, timeout=30) as response:
+                if response.status == 200:
+                    music_data = await response.read()
+                    content_type = response.headers.get('Content-Type', '')
+                    content_length = response.headers.get('Content-Length', '0')
+                    logger.debug(f"Music download successful - Type: {content_type}, Size: {content_length} bytes")
+                    results.append(DownloadResult(
+                        data=music_data,
+                        media_type=MediaType.AUDIO,
+                        caption="Audio track"
+                    ))
+                else:
+                    logger.debug(f"Music download failed with status: {response.status}")
+                    logger.debug(await response.text())
+        except Exception as e:
+            logger.debug(f"Music download failed: {e}", exc_info=True)
 
-                if convert_result.get("statusCode") == 200:
-                    return convert_result.get("result")
-
-                if convert_result.get("statusCode") == 300 and convert_result.get("jobId"):
-                    return await self._wait_for_conversion(convert_result["jobId"])
-
-                return None
+    async def _try_download_photos(
+        self,
+        session: aiohttp.ClientSession,
+        soup: BeautifulSoup,
+        results: List[DownloadResult]
+    ) -> None:
+        """Try to download photo content."""
+        try:
+            photo_links = soup.find_all("a", attrs={
+                "class": lambda c: c and "btn-premium" in c,
+                "href": lambda h: h and "dl.snapcdn.app/get" in h
+            })
+            
+            for link in photo_links:
+                try:
+                    async with session.get(
+                        link["href"],
+                        headers=self.headers,
+                        timeout=30
+                    ) as response:
+                        if response.status == 200:
+                            photo_data = await response.read()
+                            results.append(DownloadResult(
+                                data=photo_data,
+                                media_type=MediaType.PHOTO
+                            ))
+                except Exception as e:
+                    logger.debug(f"Photo download failed: {e}")
+                    continue
 
         except Exception as e:
-            logger.error(f"Error in video conversion: {e}", exc_info=True)
-            return None
+            logger.debug(f"Error processing photos: {e}")
 
-    async def _wait_for_conversion(self, job_id: str) -> Optional[str]:
-        """Wait for video conversion to complete via WebSocket."""
-        logger.debug(f"Starting WebSocket connection for job ID: {job_id}")
-        ws_url = f"wss://s1.tik-cdn.com/sub/{job_id}?fname=TikDownloader.io"
-        ws_headers = {
-            **self.headers,
-            "Sec-WebSocket-Version": "13",
-            "Sec-WebSocket-Extensions": "permessage-deflate",
-            "Connection": "keep-alive, Upgrade",
-            "Sec-Fetch-Dest": "websocket",
-            "Sec-Fetch-Mode": "websocket",
-            "Sec-Fetch-Site": "cross-site"
+    async def _fetch_tikdownloader_data(self, url: str, session: aiohttp.ClientSession) -> Optional[str]:
+        """Fetch initial data from tikdownloader.io."""
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0",
+            "Accept": "*/*",
+            "Accept-Language": "en,en-US;q=0.8,ru-RU;q=0.5,ru;q=0.3",
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "X-Requested-With": "XMLHttpRequest",
+            "Origin": "https://tikdownloader.io",
+            "Referer": "https://tikdownloader.io/en",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
         }
 
-        try:
-            async with websockets.connect(
-                ws_url,
-                extra_headers=ws_headers,
-                subprotocols=['tik-cdn'],
-                compression=None,
-                max_size=None,
-                close_timeout=10
-            ) as websocket:
-                return await self._handle_websocket_messages(websocket)
+        data = {"q": url, "lang": "en"}
+        async with session.post(
+            "https://tikdownloader.io/api/ajaxSearch",
+            headers=headers,
+            data=data
+        ) as response:
+            if response.status != 200:
+                logger.error(f"Initial request failed: {response.status}")
+                return None
 
-        except Exception as e:
-            logger.error(f"WebSocket error: {e}", exc_info=True)
-            return None
-
-    async def _handle_websocket_messages(self, websocket: websockets.WebSocketClientProtocol) -> Optional[str]:
-        """Handle WebSocket messages during conversion."""
-        try:
-            async def recv_message():
-                while True:
-                    try:
-                        message = await websocket.recv()
-                        logger.debug(f"WebSocket message received: {message}")
-
-                        update = json.loads(message)
-                        if update.get("action") == "success" and update.get("url"):
-                            return update["url"]
-                        elif update.get("action") == "progress":
-                            logger.debug(f"Conversion progress: {update.get('value')}%")
-
-                    except websockets.exceptions.ConnectionClosed:
-                        logger.error("WebSocket connection closed")
-                        return None
-
-            return await asyncio.wait_for(recv_message(), timeout=30)
-
-        except asyncio.TimeoutError:
-            logger.error("WebSocket operation timed out")
-            return None
+            json_response = await response.json()
+            return json_response["data"] if json_response.get("status") == "ok" else None
 
     async def _resolve_short_url(self, url: str) -> Optional[str]:
         """Resolve TikTok short URL to full URL."""
@@ -313,3 +279,28 @@ class TikTokDownloader(VideoDownloader):
         except Exception as e:
             logger.error(f"API download failed: {e}", exc_info=True)
             return None
+
+    def _parse_download_links(self, html_content: str) -> List[DownloadInfo]:
+        """Parse download links from HTML content."""
+        logger.debug("Starting to parse download links from HTML content")
+        soup = BeautifulSoup(html_content, "html.parser")
+        download_links = []
+
+        for link in soup.find_all("a", class_="tik-button-dl"):
+            href = link.get("href")
+            if not href or "#" in href:
+                continue
+
+            link_text = link.get_text().strip().lower()
+            download_info = DownloadInfo(
+                download_url=href,
+                headers=self.headers
+            )
+            
+            if "hd" in link_text:
+                download_links.insert(0, download_info)
+            elif "mp4" in link_text and "convert" not in link.get("class", []):
+                download_links.append(download_info)
+
+        logger.debug(f"Found {len(download_links)} download links")
+        return download_links

@@ -5,6 +5,7 @@ from typing import Optional
 class MediaType(Enum):
     VIDEO = auto()
     PHOTO = auto()
+    AUDIO = auto()
 
 @dataclass
 class DownloadResult:

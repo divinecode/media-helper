@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Set
 from pathlib import Path
 from dataclasses import dataclass
 from temp_manager import TempManager
-from media_types import MediaType, MediaItem
+from media_types import DownloadResult, MediaType, MediaItem
 from video_processor import VideoProcessor
 from config import Config
 from telegram.ext import ContextTypes
@@ -166,43 +166,19 @@ class VideoDownloadBot:
                 
             await status_message.edit_text("Опаааа! Работяги завершили работу. Обрабатываем контент...")
             
-            # Process the media
-            media_items = []
-            if isinstance(download_result, bytes):
-                media_items = [MediaItem.from_bytes(download_result, MediaType.VIDEO)]
-            else:
-                media_items = [
-                    MediaItem.from_bytes(item.data, item.media_type, item.caption)
-                    for item in download_result
-                ]
+            # Convert to MediaItems
+            media_items = [
+                MediaItem.from_bytes(
+                    item.data if isinstance(item, DownloadResult) else item,
+                    item.media_type if isinstance(item, DownloadResult) else MediaType.VIDEO,
+                    item.caption if isinstance(item, DownloadResult) else None
+                ) for item in (download_result if isinstance(download_result, list) else [download_result])
+            ]
 
-            if len(media_items) == 1:
-                # Single media item
-                item = media_items[0]
-                processed_data = await self._process_media(item, status_message, user_id)
-                if not processed_data:
-                    return
-
-                if item.media_type == MediaType.VIDEO:
-                    await message.reply_video(
-                        video=processed_data,
-                        caption=item.caption,
-                        reply_to_message_id=message.message_id
-                    )
-                else:
-                    await message.reply_photo(
-                        photo=processed_data,
-                        caption=item.caption,
-                        reply_to_message_id=message.message_id
-                    )
-            else:
-                # Multiple media items
-                success = await self._send_media_group(message, media_items, status_message, user_id)
-                if not success:
-                    return
-            
+            # Process and send all media items
+            await self._send_media_items(message, media_items, status_message, user_id)
             await status_message.delete()
-            
+
         except asyncio.TimeoutError:
             logger.error("Operation timed out")
             await status_message.edit_text(
@@ -214,6 +190,51 @@ class VideoDownloadBot:
                 "Анлак, произошла ошибка. Попробуй позже."
             )
 
+    async def _send_media_items(
+        self,
+        message: Message,
+        media_items: List[MediaItem],
+        status_message: Message,
+        user_id: int
+    ) -> None:
+        """Process and send all media items."""
+        if not media_items:
+            return
+
+        photos_and_videos = []
+        audio_items = []
+
+        # Process all items
+        for item in media_items:
+            processed_data = await self._process_media(item, status_message, user_id)
+            if not processed_data:
+                continue
+
+            if item.media_type == MediaType.AUDIO:
+                audio_items.append((processed_data, item.caption))
+            elif item.media_type in (MediaType.VIDEO, MediaType.PHOTO):
+                media_cls = InputMediaVideo if item.media_type == MediaType.VIDEO else InputMediaPhoto
+                photos_and_videos.append(media_cls(
+                    media=processed_data,
+                    caption=item.caption
+                ))
+
+        # Send photos and videos as media group
+        if photos_and_videos:
+            await message.reply_media_group(
+                media=photos_and_videos,
+                reply_to_message_id=message.message_id
+            )
+
+        # Send audio files separately (Telegram doesn't support audio in media groups)
+        for audio_data, caption in audio_items:
+            await message.reply_audio(
+                audio=audio_data,
+                caption=caption,
+                title=caption or "Audio track",
+                reply_to_message_id=message.message_id
+            )
+
     async def _process_media(
         self,
         media_item: MediaItem,
@@ -221,7 +242,8 @@ class VideoDownloadBot:
         user_id: int
     ) -> Optional[bytes]:
         """Process a single media item, applying compression based on configuration."""
-        if media_item.media_type != MediaType.VIDEO:
+        # Handle non-video content directly
+        if media_item.media_type in (MediaType.PHOTO, MediaType.AUDIO):
             return media_item.data
 
         size_mb = media_item.size_mb
@@ -280,50 +302,6 @@ class VideoDownloadBot:
                 return media_item.data
 
         return media_item.data
-
-    async def _send_media_group(
-        self,
-        message: Message,
-        media_items: List[MediaItem],
-        status_message: Message,
-        user_id: int
-    ) -> bool:
-        """Send multiple media items as a group."""
-        try:
-            logger.debug(f"Preparing to send {len(media_items)} items as media group for user {user_id}")
-            media_group = []
-            first_caption = True
-
-            for item in media_items:
-                processed_data = await self._process_media(item, status_message, user_id)
-                if not processed_data:
-                    return False
-
-                if item.media_type == MediaType.VIDEO:
-                    media_group.append(
-                        InputMediaVideo(
-                            media=processed_data,
-                            caption=item.caption if first_caption else None
-                        )
-                    )
-                else:
-                    media_group.append(
-                        InputMediaPhoto(
-                            media=processed_data,
-                            caption=item.caption if first_caption else None
-                        )
-                    )
-                first_caption = False
-
-            await message.reply_media_group(
-                media=media_group,
-                reply_to_message_id=message.message_id
-            )
-            return True
-
-        except Exception as e:
-            logger.error(f"Error sending media group for user {user_id}: {e}", exc_info=True)
-            return False
 
     def _bot_was_mentioned(self, update: Update) -> bool:
         """Check if the bot was mentioned in the message."""
