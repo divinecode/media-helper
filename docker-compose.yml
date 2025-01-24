@@ -1,5 +1,6 @@
 services:
   media-helper:
+    container_name: media-helper
     build:
       context: .
       dockerfile: Dockerfile

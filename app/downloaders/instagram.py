@@ -8,12 +8,14 @@ from media_types import DownloadResult, MediaType
 from config import Config
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 class InstagramDownloader(VideoDownloader):
     LINK_REGEX = re.compile(r"https?://(?:www\.)?instagram\.com/(?:p|reel)/([A-Za-z0-9_-]+)")
     
     def __init__(self, config: Config):
         super().__init__(config)
+        logger.debug("Initializing Instagram downloader")
         self.loader = instaloader.Instaloader(
             dirname_pattern=str(self.config.temp_dir),
             download_pictures=True,
@@ -27,14 +29,19 @@ class InstagramDownloader(VideoDownloader):
             filename_pattern="{shortcode}"  # Simplified filename pattern
         )
         
-        # Try to load saved session if credentials are provided
-        if hasattr(config, 'instagram_session_file') and config.instagram_session_file:
+        # Try to load session file if provided
+        if self.config.instagram_session_file:
             try:
-                self.loader.load_session_from_file(
-                    config.instagram_username,
-                    str(config.instagram_session_file)
-                )
-                logger.info("Successfully loaded Instagram session")
+                logger.info(f"Using Instagram session from {self.config.instagram_session_file}")
+                if self.config.instagram_session_file.exists():
+                    # Load existing session
+                    self.loader.load_session_from_file(
+                        username=None,  # Username will be determined from session file
+                        filename=str(self.config.instagram_session_file)
+                    )
+                    logger.info("Successfully loaded Instagram session")
+                else:
+                    logger.warning(f"Session file not found: {self.config.instagram_session_file}")
             except Exception as e:
                 logger.warning(f"Failed to load Instagram session: {e}")
     

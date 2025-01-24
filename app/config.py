@@ -1,6 +1,6 @@
 import os
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 from pathlib import Path
 
 @dataclass
@@ -35,7 +35,7 @@ class Config:
     bot_username: str
     allowed_usernames: List[str]
     yt_proxy: str
-    cookies_file: Path
+    state_dir: Path  # New: directory for persistent state
     temp_dir: Path
     
     # Optional parameters (with defaults)
@@ -58,6 +58,10 @@ class Config:
     # Compression settings
     compression: CompressionConfig = field(default_factory=CompressionConfig)
     
+    # File paths with defaults relative to state_dir
+    cookies_file: Optional[Path] = Path("cookies.txt")
+    instagram_session_file: Optional[Path] = Path("instagram.session")
+    
     @classmethod
     def from_env(cls) -> 'Config':
         compression = CompressionConfig(
@@ -78,6 +82,14 @@ class Config:
             second_pass_audio_bitrate=int(os.getenv("SECOND_PASS_AUDIO_BITRATE", "96")),
         )
         
+        # Setup directories
+        temp_dir = Path(os.getenv("TEMP_DIR", "temp"))
+        state_dir = Path(os.getenv("STATE_DIR", "state"))
+        
+        # Get relative file paths
+        cookies_path = os.getenv("COOKIES_FILE", "cookies.txt")
+        instagram_session = os.getenv("INSTAGRAM_SESSION_FILE", "instagram.session")
+        
         return cls(
             # Bot settings
             bot_token=os.getenv("BOT_TOKEN", ""),
@@ -86,8 +98,8 @@ class Config:
             
             # Download settings
             yt_proxy=os.getenv("YT_PROXY", ""),
-            cookies_file=Path(os.getenv("COOKIES_FILE", "cookies.txt")),
-            temp_dir=Path(os.getenv("TEMP_DIR", "temp")),
+            cookies_file=state_dir / cookies_path if cookies_path else None,
+            temp_dir=temp_dir,
             download_timeout=int(os.getenv("DOWNLOAD_TIMEOUT", "90")),
             
             # Multi-user settings
@@ -105,4 +117,10 @@ class Config:
             
             # Compression settings
             compression=compression,
+            
+            # Directory settings
+            state_dir=state_dir,
+            
+            # File paths relative to state_dir
+            instagram_session_file=state_dir / instagram_session if instagram_session else None,
         )
