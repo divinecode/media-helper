@@ -6,9 +6,9 @@ from pathlib import Path
 @dataclass
 class CompressionConfig:
     # Size thresholds
-    default_compress_threshold_mb: int = 5  # Compress videos larger than this
+    default_compress_threshold_mb: int = 10  # Compress videos larger than this
     max_telegram_size_mb: int = 45
-    max_compress_size_mb: int = 100
+    max_compress_size_mb: int = 200
     
     # Default compression for videos > 5MB (balanced efficiency and quality)
     default_crf: int = 28        # Higher CRF = more compression

@@ -297,9 +297,11 @@ class TikTokDownloader(VideoDownloader):
                 headers=self.headers
             )
             
-            if "hd" in link_text:
-                download_links.insert(0, download_info)
-            elif "mp4" in link_text and "convert" not in link.get("class", []):
+# HD files are too big, so we don't want them now, but it might be useful in the future
+#            if "hd" in link_text:
+#                download_links.insert(0, download_info)
+#            el
+            if "mp4" in link_text and "convert" not in link.get("class", []):
                 download_links.append(download_info)
 
         logger.debug(f"Found {len(download_links)} download links")
