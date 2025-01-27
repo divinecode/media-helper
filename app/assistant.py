@@ -2,7 +2,8 @@ import logging
 from typing import List, Dict, Optional, Any
 import importlib
 import asyncio
-import random
+import json
+import re
 from dataclasses import dataclass, asdict
 from telethon import TelegramClient
 from telethon.tl.custom import Message
@@ -26,12 +27,21 @@ class MessageContext:
     rpl_to: Optional[int] = None
     images: List[bytes] = None
 
+    @staticmethod
+    def sanitize_text(text: str) -> str:
+        """Sanitize text to prevent JSON injection and remove problematic characters."""
+        # Remove null bytes and other control characters except newlines and tabs
+        text = ''.join(char for char in text if char >= ' ' or char in '\n\t')
+        # Escape special characters via json encoding
+        text = json.dumps(text)[1:-1]  # Remove outer quotes
+        return text
+
     def to_dict(self) -> dict:
-        """Convert to dictionary for G4F API, excluding None values and binary data."""
-        # Only include role and content for G4F
+        """Convert to dictionary for G4F API, with sanitization."""
         return {
             'role': self.role,
-            'content': self.content
+            'content': self.sanitize_text(self.content),
+            'name': self.sanitize_text(self.name)  # Add name to g4f context for better responses
         }
 
 class ChatAssistant:
@@ -149,7 +159,7 @@ class ChatAssistant:
         return messages
 
     async def _create_user_message(self, message: Message, custom_text: str, images: List[bytes] = []) -> MessageContext:
-        """Create user message context."""
+        """Create user message context with sanitized text."""
         logger.debug(f"Creating user message context for message_id={message.id}")
 
         my_id = self.bot_id == message.sender_id
@@ -158,12 +168,15 @@ class ChatAssistant:
         text = custom_text if custom_text is not None else (message.text or message.raw_text or "")
         role = "assistant" if my_id else "user"
 
+        # Sanitize name at creation
         if my_id:
             name = "Assistant (you)"
         elif isinstance(sender, User):
-            name = f"{sender.first_name or ''} {sender.last_name or ''}".strip()
+            first = sender.first_name or ''
+            last = sender.last_name or ''
+            name = f"{first} {last}".strip()
         elif isinstance(sender, Channel):
-            name = sender.title
+            name = sender.title or "Unknown Channel"
         else:
             name = "Unknown"
 
@@ -171,7 +184,7 @@ class ChatAssistant:
             role=role,
             content=text,
             name=name,
-            tag=f"@{sender.username}" if sender.username else None,
+            tag=f"@{sender.username}" if sender and sender.username else None,
             msg_id=message.id,
             rpl_to=message.reply_to.reply_to_msg_id if message.reply_to else None,
             time=message.date.timestamp()
