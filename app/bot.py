@@ -1,4 +1,4 @@
-import os
+#import os
 import re
 import asyncio
 import logging
@@ -11,6 +11,9 @@ from video_processor import VideoProcessor
 from config import Config
 from telegram.ext import ContextTypes
 from telegram import Update, InputMediaPhoto, InputMediaVideo, Message
+from g4f.client import AsyncClient
+from g4f.providers.retry_provider import RetryProvider
+import importlib
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -37,6 +40,31 @@ class VideoDownloadBot:
         # Add a task manager for message processing
         self.message_tasks: Dict[int, Set[asyncio.Task]] = {}
         
+        self.bot_id = None  # Will be set after bot initialization
+
+        # Initialize G4F client with configured providers
+        provider_classes = []
+        for provider_name in config.chat.providers:
+            try:
+                provider_module = importlib.import_module("g4f.Provider")
+                provider_class = getattr(provider_module, provider_name)
+                provider_classes.append(provider_class)  # Don't instantiate here
+            except (ImportError, AttributeError) as e:
+                logger.warning(f"Failed to load provider {provider_name}: {e}")
+
+        if not provider_classes:
+            from g4f.Provider import ChatGptt, Blackbox
+            provider_classes = [ChatGptt, Blackbox]  # Default providers if none loaded
+            logger.info("Using default providers: ChatGptt, Blackbox")
+
+        self.g4f_client = AsyncClient(
+            provider=RetryProvider(
+                providers=provider_classes,  # Pass classes, not instances
+                shuffle=config.chat.shuffle_providers
+            )
+        )
+        self.chat_history: Dict[int, List[dict]] = {}
+
     def get_user_semaphore(self, user_id: int) -> asyncio.Semaphore:
         """Get or create a semaphore for a specific user."""
         if user_id not in self.user_semaphores:
@@ -87,7 +115,18 @@ class VideoDownloadBot:
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming message with non-blocking concurrent processing."""
-        if not update.effective_user or not self._bot_was_mentioned(update):
+        if not update.effective_user:
+            return
+
+        # Set bot_id if not set
+        if self.bot_id is None and context.bot:
+            self.bot_id = context.bot.id
+
+        # Skip if message from the bot itself
+        if update.effective_user.id == self.bot_id:
+            return
+
+        if not self._bot_was_mentioned(update):
             return
             
         user_id = update.effective_user.id
@@ -95,19 +134,17 @@ class VideoDownloadBot:
         
         if not message or not message.text:
             await message.reply_text(
-                "Дурашка, поддерживаются только текстовые сообщения, в которых есть ссылки.",
+                "Дурашка, поддерживаются только текстовые сообщения, в которых есть ссылки или вопросы.",
                 reply_to_message_id=message.message_id
             )
             return
             
         urls = self._extract_urls(message.text)
         if not urls:
-            await message.reply_text(
-                "Анлак, в твоём сообщении нет ссылок.",
-                reply_to_message_id=message.message_id
-            )
+            # Handle text as a chat message using GPT
+            await self._handle_chat(message)
             return
-        
+
         # Create a new task for processing the message
         process_task = asyncio.create_task(
             self._process_download(user_id, urls[0], message)
@@ -303,6 +340,77 @@ class VideoDownloadBot:
 
         return media_item.data
 
+    async def _handle_chat(self, message: Message) -> None:
+        """Handle chat messages using GPT via AsyncClient."""
+        try:
+            user_id = message.from_user.id if message.from_user else 0
+            clean_text = re.sub(r'@\w+\s*', '', message.text).strip()
+            
+            if not clean_text:
+                await message.reply_text(
+                    "Мммм... чем могу помочь?",
+                    reply_to_message_id=message.message_id
+                )
+                return
+
+            status_message = await message.reply_text(
+                "Секунду, думаю над ответом...",
+                reply_to_message_id=message.message_id
+            )
+
+            # Initialize chat history for new users
+            if user_id not in self.chat_history:
+                self.chat_history[user_id] = [{
+                    "role": "system",
+                    "content": self.config.chat.system_prompt
+                }]
+
+            # Add user message to history
+            self.chat_history[user_id].append({
+                "role": "user",
+                "content": clean_text
+            })
+
+            # Get response from GPT using AsyncClient
+            try:
+                response = await self.g4f_client.chat.completions.create(
+                    model=self.config.chat.model,
+                    messages=self.chat_history[user_id],
+                    timeout=self.config.chat.timeout
+                )
+
+                if response and response.choices:
+                    assistant_response = response.choices[0].message.content
+                    # Add assistant response to history
+                    self.chat_history[user_id].append({
+                        "role": "assistant",
+                        "content": assistant_response
+                    })
+                    
+                    # Trim history if too long (keep last 10 messages)
+                    if len(self.chat_history[user_id]) > self.config.chat.max_history + 1:  # +1 for system message
+                        self.chat_history[user_id] = [
+                            self.chat_history[user_id][0],  # Keep system message
+                            *self.chat_history[user_id][-(self.config.chat.max_history):]  # Keep last N messages
+                        ]
+                    
+                    await status_message.edit_text(assistant_response)
+                else:
+                    raise ValueError("No valid response received")
+
+            except Exception as e:
+                logger.error(f"G4F API error: {str(e)}")
+                await status_message.edit_text(
+                    "Извини, что-то пошло не так с обработкой запроса. Попробуй позже."
+                )
+
+        except Exception as e:
+            logger.error(f"Error in chat handling: {e}", exc_info=True)
+            await message.reply_text(
+                "Извини, произошла ошибка при обработке сообщения.",
+                reply_to_message_id=message.message_id
+            )
+
     def _bot_was_mentioned(self, update: Update) -> bool:
         """Check if the bot was mentioned in the message."""
         message = update.effective_message
@@ -353,3 +461,6 @@ class VideoDownloadBot:
         
         # Shutdown thread pool in video processor
         self.video_processor.thread_pool.shutdown(wait=True)
+        
+        # Clear chat history
+        self.chat_history.clear()

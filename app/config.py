@@ -1,126 +1,131 @@
 import os
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Type, TypeVar, Any
 from pathlib import Path
 
-@dataclass
-class CompressionConfig:
-    # Size thresholds
-    default_compress_threshold_mb: int = 10  # Compress videos larger than this
-    max_telegram_size_mb: int = 45
-    max_compress_size_mb: int = 200
-    
-    # Default compression for videos > 5MB (balanced efficiency and quality)
-    default_crf: int = 28        # Higher CRF = more compression
-    default_scale: int = 1280    # Good balance for most videos
-    default_preset: str = "veryfast"  # Fast compression
-    default_audio_bitrate: int = 96  # Lower but still decent audio quality
-    
-    # First pass compression (high quality, for large videos)
-    first_pass_crf: int = 28
-    first_pass_scale: int = 1080
-    first_pass_preset: str = "fast"
-    first_pass_audio_bitrate: int = 128
-    
-    # Second pass compression (if first pass file is still too large)
-    second_pass_crf: int = 32
-    second_pass_scale: int = 720
-    second_pass_preset: str = "faster"
-    second_pass_audio_bitrate: int = 96
+T = TypeVar('T')
 
 @dataclass
-class Config:
-    # Required parameters (no defaults)
-    bot_token: str
-    bot_username: str
-    allowed_usernames: List[str]
-    yt_proxy: str
-    state_dir: Path  # New: directory for persistent state
-    temp_dir: Path
+class BaseConfig:
+    @classmethod
+    def from_env(cls: Type[T]) -> T:
+        """Create config from environment variables using metadata."""
+        field_values = {}
+        for field_info in cls.__dataclass_fields__.values():
+            env_key = field_info.metadata.get("env_key")
+            if env_key:
+                env_value = os.getenv(env_key)
+                if env_value is not None:
+                    field_values[field_info.name] = cls._convert_value(env_value, field_info.type)
+        return cls(**field_values)
+
+    @staticmethod
+    def _convert_value(value: str, field_type: Any) -> Any:
+        """Convert string value to appropriate type."""
+        if field_type == bool:
+            return value.lower() == "true"
+        elif field_type == List[str]:
+            return [p.strip() for p in value.split(",") if p.strip()]
+        elif field_type == int:
+            return int(value)
+        elif field_type == Path:
+            return Path(value)
+        return value
+
+@dataclass
+class ChatConfig(BaseConfig):
+    # Model configuration
+    model: str = field(default="gpt-4o", metadata={"env_key": "CHAT_MODEL"})
+    timeout: int = field(default=30, metadata={"env_key": "CHAT_TIMEOUT"})
+    max_history: int = field(default=20, metadata={"env_key": "CHAT_MAX_HISTORY"})
+    system_prompt: str = field(
+        default="Provide short human-like responses in language that was used in the question or asked for by the user, you allowed to be toxic but should be useful and funny",
+        metadata={"env_key": "CHAT_SYSTEM_PROMPT"}
+    )
     
-    # Optional parameters (with defaults)
-    # Multi-user settings
-    max_concurrent_downloads: int = 20
-    max_downloads_per_user: int = 3
+    # Provider configuration
+    providers: List[str] = field(
+        default_factory=lambda: ["ChatGptt", "Blackbox"],
+        metadata={"env_key": "CHAT_PROVIDERS"}
+    )
+    shuffle_providers: bool = field(
+        default=True,
+        metadata={"env_key": "CHAT_SHUFFLE_PROVIDERS"}
+    )
+
+@dataclass
+class CompressionConfig(BaseConfig):
+    # Size thresholds
+    default_compress_threshold_mb: int = field(default=10, metadata={"env_key": "DEFAULT_COMPRESS_THRESHOLD_MB"})
+    max_telegram_size_mb: int = field(default=45, metadata={"env_key": "MAX_TELEGRAM_SIZE_MB"})
+    max_compress_size_mb: int = field(default=200, metadata={"env_key": "MAX_COMPRESS_SIZE_MB"})
     
-    # Download settings
-    download_timeout: int = 90
+    # Default compression settings
+    default_crf: int = field(default=23, metadata={"env_key": "DEFAULT_CRF"})
+    default_scale: int = field(default=1280, metadata={"env_key": "DEFAULT_SCALE"})
+    default_preset: str = field(default="veryfast", metadata={"env_key": "DEFAULT_PRESET"})
+    default_audio_bitrate: int = field(default=96, metadata={"env_key": "DEFAULT_AUDIO_BITRATE"})
     
-    # Telegram API timeouts
-    read_timeout: int = 120
-    write_timeout: int = 120
-    connect_timeout: int = 120
-    pool_timeout: int = 120
+    # First pass compression
+    first_pass_crf: int = field(default=28, metadata={"env_key": "FIRST_PASS_CRF"})
+    first_pass_scale: int = field(default=1080, metadata={"env_key": "FIRST_PASS_SCALE"})
+    first_pass_preset: str = field(default="fast", metadata={"env_key": "FIRST_PASS_PRESET"})
+    first_pass_audio_bitrate: int = field(default=128, metadata={"env_key": "FIRST_PASS_AUDIO_BITRATE"})
     
-    # Connection settings
-    connection_pool_size: int = 8
+    # Second pass compression
+    second_pass_crf: int = field(default=32, metadata={"env_key": "SECOND_PASS_CRF"})
+    second_pass_scale: int = field(default=720, metadata={"env_key": "SECOND_PASS_SCALE"})
+    second_pass_preset: str = field(default="faster", metadata={"env_key": "SECOND_PASS_PRESET"})
+    second_pass_audio_bitrate: int = field(default=96, metadata={"env_key": "SECOND_PASS_AUDIO_BITRATE"})
+
+@dataclass
+class Config(BaseConfig):
+    # Required parameters with metadata
+    bot_token: str = field(default="", metadata={"env_key": "BOT_TOKEN"})
+    bot_username: str = field(default="", metadata={"env_key": "BOT_USERNAME"})
+    allowed_usernames: List[str] = field(
+        default_factory=list,
+        metadata={"env_key": "ALLOWED_USERNAMES"}
+    )
     
-    # Compression settings
+    # File paths and directories
+    state_dir: Path = field(
+        default_factory=lambda: Path("state"),
+        metadata={"env_key": "STATE_DIR"}
+    )
+    temp_dir: Path = field(
+        default_factory=lambda: Path("temp"),
+        metadata={"env_key": "TEMP_DIR"}
+    )
+    cookies_file: Optional[Path] = field(
+        default_factory=lambda: Path("cookies.txt"),
+        metadata={"env_key": "COOKIES_FILE"}
+    )
+    instagram_session_file: Optional[Path] = field(
+        default_factory=lambda: Path("instagram.session"),
+        metadata={"env_key": "INSTAGRAM_SESSION_FILE"}
+    )
+    
+    # Other settings
+    yt_proxy: str = field(default="", metadata={"env_key": "YT_PROXY"})
+    download_timeout: int = field(default=90, metadata={"env_key": "DOWNLOAD_TIMEOUT"})
+    max_concurrent_downloads: int = field(default=20, metadata={"env_key": "MAX_CONCURRENT_DOWNLOADS"})
+    max_downloads_per_user: int = field(default=3, metadata={"env_key": "MAX_DOWNLOADS_PER_USER"})
+    read_timeout: int = field(default=120, metadata={"env_key": "READ_TIMEOUT"})
+    write_timeout: int = field(default=120, metadata={"env_key": "WRITE_TIMEOUT"})
+    connect_timeout: int = field(default=120, metadata={"env_key": "CONNECT_TIMEOUT"})
+    pool_timeout: int = field(default=120, metadata={"env_key": "POOL_TIMEOUT"})
+    connection_pool_size: int = field(default=8, metadata={"env_key": "CONNECTION_POOL_SIZE"})
+    
+    # Config objects
     compression: CompressionConfig = field(default_factory=CompressionConfig)
-    
-    # File paths with defaults relative to state_dir
-    cookies_file: Optional[Path] = Path("cookies.txt")
-    instagram_session_file: Optional[Path] = Path("instagram.session")
-    
+    chat: ChatConfig = field(default_factory=ChatConfig)
+
     @classmethod
     def from_env(cls) -> 'Config':
-        compression = CompressionConfig(
-            default_compress_threshold_mb=int(os.getenv("DEFAULT_COMPRESS_THRESHOLD_MB", "5")),
-            max_telegram_size_mb=int(os.getenv("MAX_TELEGRAM_SIZE_MB", "45")),
-            max_compress_size_mb=int(os.getenv("MAX_COMPRESS_SIZE_MB", "100")),
-            default_crf=int(os.getenv("DEFAULT_CRF", "23")),
-            default_scale=int(os.getenv("DEFAULT_SCALE", "1280")),
-            default_preset=os.getenv("DEFAULT_PRESET", "veryfast"),
-            default_audio_bitrate=int(os.getenv("DEFAULT_AUDIO_BITRATE", "128")),
-            first_pass_crf=int(os.getenv("FIRST_PASS_CRF", "28")),
-            first_pass_scale=int(os.getenv("FIRST_PASS_SCALE", "1080")),
-            first_pass_preset=os.getenv("FIRST_PASS_PRESET", "fast"),
-            first_pass_audio_bitrate=int(os.getenv("FIRST_PASS_AUDIO_BITRATE", "128")),
-            second_pass_crf=int(os.getenv("SECOND_PASS_CRF", "32")),
-            second_pass_scale=int(os.getenv("SECOND_PASS_SCALE", "720")),
-            second_pass_preset=os.getenv("SECOND_PASS_PRESET", "faster"),
-            second_pass_audio_bitrate=int(os.getenv("SECOND_PASS_AUDIO_BITRATE", "96")),
-        )
-        
-        # Setup directories
-        temp_dir = Path(os.getenv("TEMP_DIR", "temp"))
-        state_dir = Path(os.getenv("STATE_DIR", "state"))
-        
-        # Get relative file paths
-        cookies_path = os.getenv("COOKIES_FILE", "cookies.txt")
-        instagram_session = os.getenv("INSTAGRAM_SESSION_FILE", "instagram.session")
-        
-        return cls(
-            # Bot settings
-            bot_token=os.getenv("BOT_TOKEN", ""),
-            bot_username=os.getenv("BOT_USERNAME", ""),
-            allowed_usernames=[u.strip() for u in os.getenv("ALLOWED_USERNAMES", "").split(",") if u.strip()],
-            
-            # Download settings
-            yt_proxy=os.getenv("YT_PROXY", ""),
-            cookies_file=state_dir / cookies_path if cookies_path else None,
-            temp_dir=temp_dir,
-            download_timeout=int(os.getenv("DOWNLOAD_TIMEOUT", "90")),
-            
-            # Multi-user settings
-            max_concurrent_downloads=int(os.getenv("MAX_CONCURRENT_DOWNLOADS", "20")),
-            max_downloads_per_user=int(os.getenv("MAX_DOWNLOADS_PER_USER", "3")),
-            
-            # Telegram API timeouts
-            read_timeout=int(os.getenv("READ_TIMEOUT", "120")),
-            write_timeout=int(os.getenv("WRITE_TIMEOUT", "120")),
-            connect_timeout=int(os.getenv("CONNECT_TIMEOUT", "120")),
-            pool_timeout=int(os.getenv("POOL_TIMEOUT", "120")),
-            
-            # Connection settings
-            connection_pool_size=int(os.getenv("CONNECTION_POOL_SIZE", "8")),
-            
-            # Compression settings
-            compression=compression,
-            
-            # Directory settings
-            state_dir=state_dir,
-            
-            # File paths relative to state_dir
-            instagram_session_file=state_dir / instagram_session if instagram_session else None,
-        )
+        """Create Config from environment variables and nested configs."""
+        # Initialize nested configs first
+        base_config = super().from_env()
+        base_config.compression = CompressionConfig.from_env()
+        base_config.chat = ChatConfig.from_env()
+        return base_config
