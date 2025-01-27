@@ -103,7 +103,7 @@ class ChatAssistant:
 
         try:
             # Use message action instead of ChatAction
-            async with message.client.action(message.chat_id, 'typing'):
+            async with self.tg.action(message.chat_id, 'typing'):
                 await self._generate_and_send_response(message, images, conversation_context)
         except Exception as e:
             await self._handle_chat_error(message, e)
@@ -253,13 +253,24 @@ class ChatAssistant:
         context_messages: List[MessageContext] = []
         max_context = self.config.chat.max_history - 1
         
+        # Get reply chain first
         if message.reply_to:
             reply_chain = await self._get_reply_chain(message, max_context // 2)
             context_messages.extend(reply_chain)
 
+        # Get nearby messages to fill remaining context
+        remaining_context = max_context - len(context_messages)
+        if remaining_context > 0:
+            nearby_messages = await self._get_nearby_messages(message, remaining_context)
+            context_messages.extend(nearby_messages)
+
         # Sort messages by timestamp to maintain conversation flow
         context_messages.sort(key=lambda x: x.time)
         logger.debug(f"Retrieved {len(context_messages)} context messages")
+
+        # Remove any message that is newer than the current message
+        context_messages = [msg for msg in context_messages if msg.time < message.date.timestamp()]
+
         return context_messages
 
     async def _get_reply_chain(self, message: Message, max_depth: int) -> List[MessageContext]:
@@ -278,6 +289,28 @@ class ChatAssistant:
             context_messages.insert(0, msg_context)
             current_message = reply_to
             depth += 1
+
+        return context_messages
+
+    async def _get_nearby_messages(self, message: Message, limit: int) -> List[MessageContext]:
+        """Get recent messages from the same chat."""
+        context_messages: List[MessageContext] = []
+        
+        try:
+            # Get messages before the current one
+            async for msg in self.tg.iter_messages(
+                message.chat_id,
+                limit=limit,
+                max_id=message.id,
+                reverse=True  # Get in chronological order
+            ):
+                if msg is Message and msg.id != message.id:  # Skip current message
+                    msg_context = await self._create_user_message(msg, None)
+                    context_messages.append(msg_context)
+                    logger.debug(f"Added nearby message: {msg.id}")
+                    
+        except Exception as e:
+            logger.error(f"Error getting nearby messages: {e}")
 
         return context_messages
 
