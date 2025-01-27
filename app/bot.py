@@ -3,17 +3,14 @@ import re
 import asyncio
 import logging
 from typing import Dict, List, Optional, Set
-from pathlib import Path
-from dataclasses import dataclass
 from temp_manager import TempManager
 from media_types import DownloadResult, MediaType, MediaItem
 from video_processor import VideoProcessor
 from config import Config
 from telegram.ext import ContextTypes
-from telegram import Update, InputMediaPhoto, InputMediaVideo, Message
-from g4f.client import AsyncClient
-from g4f.providers.retry_provider import RetryProvider
-import importlib
+from telegram import Update, InputMediaPhoto, InputMediaVideo, Message, PhotoSize
+from telegram.constants import ChatAction
+from assistant import ChatAssistant
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -21,6 +18,8 @@ logger.setLevel(logging.DEBUG)
 class VideoDownloadBot:
     def __init__(self, config: Config):
         self.config = config
+        self.bot_id = config.bot_id
+
         self.temp_manager = TempManager(config.temp_dir)
         self.video_processor = VideoProcessor(config, self.temp_manager)
         self.downloaders = []
@@ -39,31 +38,9 @@ class VideoDownloadBot:
         
         # Add a task manager for message processing
         self.message_tasks: Dict[int, Set[asyncio.Task]] = {}
-        
-        self.bot_id = None  # Will be set after bot initialization
 
-        # Initialize G4F client with configured providers
-        provider_classes = []
-        for provider_name in config.chat.providers:
-            try:
-                provider_module = importlib.import_module("g4f.Provider")
-                provider_class = getattr(provider_module, provider_name)
-                provider_classes.append(provider_class)  # Don't instantiate here
-            except (ImportError, AttributeError) as e:
-                logger.warning(f"Failed to load provider {provider_name}: {e}")
-
-        if not provider_classes:
-            from g4f.Provider import ChatGptt, Blackbox
-            provider_classes = [ChatGptt, Blackbox]  # Default providers if none loaded
-            logger.info("Using default providers: ChatGptt, Blackbox")
-
-        self.g4f_client = AsyncClient(
-            provider=RetryProvider(
-                providers=provider_classes,  # Pass classes, not instances
-                shuffle=config.chat.shuffle_providers
-            )
-        )
-        self.chat_history: Dict[int, List[dict]] = {}
+        # Replace G4F client initialization with ChatAssistant
+        self.assistant = ChatAssistant(config)
 
     def get_user_semaphore(self, user_id: int) -> asyncio.Semaphore:
         """Get or create a semaphore for a specific user."""
@@ -118,48 +95,177 @@ class VideoDownloadBot:
         if not update.effective_user:
             return
 
-        # Set bot_id if not set
-        if self.bot_id is None and context.bot:
-            self.bot_id = context.bot.id
-
         # Skip if message from the bot itself
         if update.effective_user.id == self.bot_id:
             return
 
-        if not self._bot_was_mentioned(update):
-            return
-            
-        user_id = update.effective_user.id
         message = update.effective_message
-        
-        if not message or not message.text:
-            await message.reply_text(
-                "Дурашка, поддерживаются только текстовые сообщения, в которых есть ссылки или вопросы.",
-                reply_to_message_id=message.message_id
-            )
-            return
-            
-        urls = self._extract_urls(message.text)
-        if not urls:
-            # Handle text as a chat message using GPT
-            await self._handle_chat(message)
+        if not message:
             return
 
-        # Create a new task for processing the message
+        # Check if this is a private chat or bot was mentioned
+        is_private_chat = message.chat.type == "private"
+        was_mentioned = self._bot_was_mentioned(update)
+        
+        if not (is_private_chat or was_mentioned):
+            return
+
+        # Extract message text and images
+        text = message.text or message.caption or ""
+        images = self._get_message_images(message)
+        
+        # Handle URLs first
+        urls = self._extract_urls(text)
+        if urls:
+            await self._handle_url_download(urls[0], message)
+            return
+
+        # Get conversation context and handle chat
+        conversation_context = await self.assistant.get_conversation_context(message)
+        await self.assistant.handle_message(message, images, conversation_context)
+
+    async def _get_conversation_context(self, message: Message, context: ContextTypes.DEFAULT_TYPE) -> List[dict]:
+        """Get conversation context from reply chain."""
+        context_messages = []
+        current_message = message
+        max_context = self.config.chat.max_history - 1  # Leave room for the current message
+
+        while current_message.reply_to_message and len(context_messages) < max_context:
+            reply_to = current_message.reply_to_message
+            
+            # Skip messages not from user or bot
+            if reply_to.from_user.id not in [self.bot_id, current_message.from_user.id]:
+                break
+
+            # Add message to context
+            text = reply_to.text or reply_to.caption or ""
+            role = "assistant" if reply_to.from_user.id == self.bot_id else "user"
+            context_messages.insert(0, {
+                "role": role,
+                "content": text
+            })
+            
+            current_message = reply_to
+
+        return context_messages
+
+    def _get_message_images(self, message: Message) -> List[str]:
+        """Extract images from message and convert to base64."""
+        images = []
+        
+        # Check photos in message
+        if message.photo:
+            photo: PhotoSize = max(message.photo, key=lambda p: p.file_size)
+            images.append(photo.file_id)
+            
+        # Check document attachments
+        if message.document and message.document.mime_type.startswith('image/'):
+            images.append(message.document.file_id)
+            
+        return images
+
+    async def _handle_chat(self, message: Message, images: List[str], conversation_context: List[dict]) -> None:
+        """Handle chat messages using GPT via AsyncClient."""
+        try:
+            user_id = message.from_user.id if message.from_user else 0
+            clean_text = re.sub(r'@\w+\s*', '', message.text or message.caption or "").strip()
+            
+            if not clean_text and not images:
+                await message.reply_text(
+                    "Мммм... чем могу помочь?",
+                    reply_to_message_id=message.message_id
+                )
+                return
+
+            # Start typing action
+            async with message.chat.action(ChatAction.TYPING):
+                # Prepare messages list with system prompt and context
+                messages = [{
+                    "role": "system",
+                    "content": self.config.chat.system_prompt
+                }]
+                messages.extend(conversation_context)
+
+                # Add current message with images if present
+                current_message = {"role": "user", "content": clean_text}
+                if images:
+                    image_data = []
+                    for file_id in images:
+                        file = await message.bot.get_file(file_id)
+                        image_bytes = await file.download_as_bytearray()
+                        image_data.append(image_bytes)
+                    
+                    # Add images to the message
+                    current_message["images"] = image_data
+
+                messages.append(current_message)
+
+                try:
+                    response = await self.g4f_client.chat.completions.create(
+                        model=self.config.chat.model,
+                        messages=messages,
+                        timeout=self.config.chat.timeout
+                    )
+
+                    if response and response.choices:
+                        assistant_response = response.choices[0].message.content
+                        # Add to chat history
+                        if user_id not in self.chat_history:
+                            self.chat_history[user_id] = [{
+                                "role": "system",
+                                "content": self.config.chat.system_prompt
+                            }]
+                        
+                        # Add user message and response to history
+                        self.chat_history[user_id].append(current_message)
+                        self.chat_history[user_id].append({
+                            "role": "assistant",
+                            "content": assistant_response
+                        })
+                        
+                        # Trim history if too long
+                        if len(self.chat_history[user_id]) > self.config.chat.max_history + 1:
+                            self.chat_history[user_id] = [
+                                self.chat_history[user_id][0],  # Keep system message
+                                *self.chat_history[user_id][-(self.config.chat.max_history):]
+                            ]
+                        
+                        await message.reply_text(
+                            assistant_response,
+                            reply_to_message_id=message.message_id
+                        )
+                    else:
+                        raise ValueError("No valid response received")
+
+                except Exception as e:
+                    logger.error(f"G4F API error: {str(e)}")
+                    await message.reply_text(
+                        "Извини, что-то пошло не так с обработкой запроса. Попробуй позже.",
+                        reply_to_message_id=message.message_id
+                    )
+
+        except Exception as e:
+            logger.error(f"Error in chat handling: {e}", exc_info=True)
+            await message.reply_text(
+                "Извини, произошла ошибка при обработке сообщения.",
+                reply_to_message_id=message.message_id
+            )
+
+    async def _handle_url_download(self, url: str, message: Message):
+        """Handle URL download in a separate task."""
+        user_id = message.from_user.id
         process_task = asyncio.create_task(
-            self._process_download(user_id, urls[0], message)
+            self._process_download(user_id, url, message)
         )
         
-        # Add task to user's task set
         if user_id not in self.message_tasks:
             self.message_tasks[user_id] = set()
         self.message_tasks[user_id].add(process_task)
         
-        # Set up task cleanup callback
         process_task.add_done_callback(
             lambda t: self._cleanup_task(user_id, t)
         )
-        
+
     async def _process_download(self, user_id: int, url: str, message: Message):
         """Process a single download request."""
         try:
@@ -340,77 +446,6 @@ class VideoDownloadBot:
 
         return media_item.data
 
-    async def _handle_chat(self, message: Message) -> None:
-        """Handle chat messages using GPT via AsyncClient."""
-        try:
-            user_id = message.from_user.id if message.from_user else 0
-            clean_text = re.sub(r'@\w+\s*', '', message.text).strip()
-            
-            if not clean_text:
-                await message.reply_text(
-                    "Мммм... чем могу помочь?",
-                    reply_to_message_id=message.message_id
-                )
-                return
-
-            status_message = await message.reply_text(
-                "Секунду, думаю над ответом...",
-                reply_to_message_id=message.message_id
-            )
-
-            # Initialize chat history for new users
-            if user_id not in self.chat_history:
-                self.chat_history[user_id] = [{
-                    "role": "system",
-                    "content": self.config.chat.system_prompt
-                }]
-
-            # Add user message to history
-            self.chat_history[user_id].append({
-                "role": "user",
-                "content": clean_text
-            })
-
-            # Get response from GPT using AsyncClient
-            try:
-                response = await self.g4f_client.chat.completions.create(
-                    model=self.config.chat.model,
-                    messages=self.chat_history[user_id],
-                    timeout=self.config.chat.timeout
-                )
-
-                if response and response.choices:
-                    assistant_response = response.choices[0].message.content
-                    # Add assistant response to history
-                    self.chat_history[user_id].append({
-                        "role": "assistant",
-                        "content": assistant_response
-                    })
-                    
-                    # Trim history if too long (keep last 10 messages)
-                    if len(self.chat_history[user_id]) > self.config.chat.max_history + 1:  # +1 for system message
-                        self.chat_history[user_id] = [
-                            self.chat_history[user_id][0],  # Keep system message
-                            *self.chat_history[user_id][-(self.config.chat.max_history):]  # Keep last N messages
-                        ]
-                    
-                    await status_message.edit_text(assistant_response)
-                else:
-                    raise ValueError("No valid response received")
-
-            except Exception as e:
-                logger.error(f"G4F API error: {str(e)}")
-                await status_message.edit_text(
-                    "Извини, что-то пошло не так с обработкой запроса. Попробуй позже."
-                )
-
-        except Exception as e:
-            logger.error(f"Error in chat handling: {e}", exc_info=True)
-            await message.reply_text(
-                "Извини, произошла ошибка при обработке сообщения.",
-                reply_to_message_id=message.message_id
-            )
-
     def _bot_was_mentioned(self, update: Update) -> bool:
         """Check if the bot was mentioned in the message."""
         message = update.effective_message
@@ -463,4 +498,4 @@ class VideoDownloadBot:
         self.video_processor.thread_pool.shutdown(wait=True)
         
         # Clear chat history
-        self.chat_history.clear()
+        self.assistant.clear_history()
