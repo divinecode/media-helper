@@ -132,7 +132,14 @@ class ChatAssistant:
 
     def _extract_message_text(self, message: Message) -> str:
         """Extract and clean message text."""
-        return (message.text or message.raw_text or "").strip()
+        text = message.text or message.raw_text or ""
+        #quote = message.quote and message.quote.text or "" # Not supported in telethon 1.38.1 
+
+        #if quote:
+        #    # Add markdown quote formatting
+        #    text = f"> {quote}\n\n{text}"
+
+        return text.strip()
 
     async def _build_chat_messages(self, message_text: str, images: List[str], conversation_context: List[MessageContext], message: Message) -> List[MessageContext]:
         """Build complete message context for AI."""
@@ -212,6 +219,8 @@ class ChatAssistant:
                 
                 # Convert messages to G4F format
                 g4f_messages = [msg.to_dict() for msg in messages]
+                for idx, msg in enumerate(g4f_messages):
+                    logger.debug(f"Message {idx}: {msg}")
                 logger.debug(f"Requesting AI completion for user {user_id}")
                 
                 response = await self.g4f_client.chat.completions.create(
