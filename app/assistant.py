@@ -29,12 +29,18 @@ class MessageContext:
 
     @staticmethod
     def sanitize_text(text: str) -> str:
-        """Sanitize text to prevent JSON injection and remove problematic characters."""
-        # Remove null bytes and other control characters except newlines and tabs
-        text = ''.join(char for char in text if char >= ' ' or char in '\n\t')
-        # Escape special characters via json encoding
-        text = json.dumps(text)[1:-1]  # Remove outer quotes
-        return text
+        """Sanitize text to prevent JSON injection and escape JSON-specific characters."""
+        # Escape JSON-specific characters without converting to Unicode escape sequences
+        replacements = {
+            '\\': '\\\\',
+            '"': '\\"',
+            '\b': '\\b',
+            '\f': '\\f',
+            '\n': '\\n',
+            '\r': '\\r',
+            '\t': '\\t'
+        }
+        return ''.join(replacements.get(c, c) for c in text)
 
     def to_dict(self) -> dict:
         """Convert to dictionary for G4F API, with sanitization."""

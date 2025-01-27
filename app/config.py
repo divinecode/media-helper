@@ -55,7 +55,7 @@ class ChatConfig(BaseConfig):
     
     # Provider configuration
     providers: List[str] = field(
-        default_factory=lambda: ["ChatGptt", "Blackbox"],
+        default_factory=lambda: ["Blackbox"], # +"ChatGptt"
         metadata={"env_key": "CHAT_PROVIDERS"}
     )
     shuffle_providers: bool = field(
