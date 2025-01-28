@@ -1,3 +1,4 @@
+from datetime import datetime
 import logging
 from typing import List, Dict, Optional, Any
 import importlib
@@ -27,27 +28,15 @@ class MessageContext:
     rpl_to: Optional[int] = None
     images: List[bytes] = None
 
-    @staticmethod
-    def sanitize_text(text: str) -> str:
-        """Sanitize text to prevent JSON injection and escape JSON-specific characters."""
-        # Escape JSON-specific characters without converting to Unicode escape sequences
-        replacements = {
-            '\\': '\\\\',
-            '"': '\\"',
-            '\b': '\\b',
-            '\f': '\\f',
-            '\n': '\\n',
-            '\r': '\\r',
-            '\t': '\\t'
-        }
-        return ''.join(replacements.get(c, c) for c in text)
 
     def to_dict(self) -> dict:
-        """Convert to dictionary for G4F API, with sanitization."""
         return {
             'role': self.role,
-            'content': self.sanitize_text(self.content),
-            'name': self.sanitize_text(self.name)  # Add name to g4f context for better responses
+            'content': f"#{self.msg_id}"
+                + f" {datetime.fromtimestamp(self.time).strftime('%Y-%m-%d %H:%M:%S')} "
+                + self.name + (f" (@{self.tag})" if self.tag else "")
+                + (f" replied to #{self.rpl_to}" if self.rpl_to else "")
+                + f": {self.content}",
         }
 
 class ChatAssistant:
@@ -150,21 +139,21 @@ class ChatAssistant:
     async def _build_chat_messages(self, message_text: str, images: List[str], conversation_context: List[MessageContext], message: Message) -> List[MessageContext]:
         """Build complete message context for AI."""
         logger.debug("Building chat messages context")
-        messages: List[MessageContext] = [
-            MessageContext(
-                role="system",
-                content=self.config.chat.system_prompt,
-                name="System",
-                tag=None,
-                msg_id=0,
-                time=0
-            )
-        ]
+        messages: List[MessageContext] = []
         
         if conversation_context:
             logger.debug(f"Adding {len(conversation_context)} context messages")
             messages.extend(conversation_context)
         
+        messages.append(MessageContext(
+                role="system",
+                content=self.config.chat.system_prompt,
+                name="System",
+                tag=None,
+                msg_id=-1,
+                time=datetime.now().timestamp()
+        ))
+
         current_context = await self._create_user_message(message, message_text, images)
         logger.debug(f"Created user message context: {current_context}")
         messages.append(current_context)
