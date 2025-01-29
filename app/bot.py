@@ -118,7 +118,6 @@ class VideoDownloadBot:
 
         # Extract message text and images
         text = message.text or message.caption or ""
-        #images = self._get_message_images(message)
         
         # Handle URLs first
         urls = self._extract_urls(text)
@@ -127,21 +126,6 @@ class VideoDownloadBot:
             return
 
         await self.assistant.handle_message(update, context)
-
-    def _get_message_images(self, message: Message) -> List[str]:
-        """Extract images from message and convert to base64."""
-        images = []
-        
-        # Check photos in message
-        if message.photo:
-            photo: PhotoSize = max(message.photo, key=lambda p: p.file_size)
-            images.append(photo.file_id)
-            
-        # Check document attachments
-        if message.document and message.document.mime_type.startswith('image/'):
-            images.append(message.document.file_id)
-            
-        return images
 
     async def _handle_url_download(self, url: str, message: Message):
         """Handle URL download in a separate task."""

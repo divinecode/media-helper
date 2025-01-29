@@ -90,7 +90,8 @@ class ChatAssistant:
         """Handle chat message and generate response."""
         message = update.effective_message
         conversation_context = await self.get_conversation_context(message)
-        images=[]
+        images = self._get_message_images(message)
+
         if not self._is_valid_message(message):
             return
 
@@ -106,6 +107,21 @@ class ChatAssistant:
                     await self._stop_typing_indicator(typing_task)
             except Exception as e:
                 await self._handle_chat_error(message, context, e)
+
+    def _get_message_images(self, message: Message) -> List[str]:
+        """Extract images from message and convert to base64."""
+        images = []
+        
+        # Check photos in message
+        if message.photo:
+            photo: PhotoSize = max(message.photo, key=lambda p: p.file_size)
+            images.append(photo.file_id)
+            
+        # Check document attachments
+        if message.document and message.document.mime_type.startswith('image/'):
+            images.append(message.document.file_id)
+            
+        return images
 
     async def get_conversation_context(self, message: Message) -> List[MessageContext]:
         """Get conversation context from reply chain."""
@@ -144,16 +160,22 @@ class ChatAssistant:
             await self._send_empty_message_response(message, context)
             return
 
-        chat_messages = await self._build_chat_messages(message_text, images, conversation_context, message)
+        chat_messages = await self._build_chat_messages(images, conversation_context, message)
         logger.debug(f"Built conversation context with {len(chat_messages)} messages")
         
         await self._send_ai_response(chat_messages, message, context)
 
     def _extract_message_text(self, message: Message) -> str:
         """Extract and clean message text."""
-        return (message.text or message.caption or "").strip()
+        text = (message.text or message.caption or "").strip()
 
-    async def _build_chat_messages(self, message_text: str, images: List[bytes], conversation_context: List[MessageContext], message: Message) -> List[dict]:
+        quote = message.quote
+        if quote:
+            text = f"> {quote.text}\n\n{text}"
+
+        return text
+
+    async def _build_chat_messages(self, images: List[bytes], conversation_context: List[MessageContext], message: Message) -> List[dict]:
         """Build complete message context for AI."""
         logger.debug("Building chat messages context")
         messages = []
@@ -171,13 +193,13 @@ class ChatAssistant:
             time=datetime.now().timestamp()
         ).to_dict())
 
-        current_context = await self._create_user_message(message, message_text, images)
+        current_context = await self._create_user_message(message, images)
         logger.debug(f"Created user message context: {current_context.to_dict()}")
         messages.append(current_context.to_dict())
         
         return messages
 
-    async def _create_user_message(self, message: Message, text: str, images: List[bytes] = None) -> MessageContext:
+    async def _create_user_message(self, message: Message, images: List[bytes] = None) -> MessageContext:
         """Create user message context."""
         logger.debug(f"Creating user message context for message_id={message.message_id}")
         
@@ -186,7 +208,7 @@ class ChatAssistant:
 
         context = MessageContext(
             role="assistant" if my_id else "user",
-            content=text,
+            content=self._extract_message_text(message),
             name="Assistant (you)" if my_id else f"{sender.first_name or ''} {sender.last_name or ''}".strip(),
             tag=sender.username,
             msg_id=message.message_id,
