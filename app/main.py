@@ -32,7 +32,7 @@ def main() -> None:
         )
 
         async def post_init(application: Application) -> None:
-            await bot.initialize()
+            await bot.initialize(application)
             logger.info("Bot initialized successfully")
 
         application.post_init = post_init
