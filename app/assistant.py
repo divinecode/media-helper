@@ -4,11 +4,9 @@ from typing import List, Dict, Optional, Any
 import importlib
 import asyncio
 import json
-import re
 from dataclasses import dataclass, asdict
-from telethon import TelegramClient
-from telethon.tl.custom import Message
-from telethon.tl.types import User, Channel, MessageReplyHeader
+from telegram import Update, Message, User, Chat
+from telegram.ext import ContextTypes
 from g4f.client import AsyncClient
 from g4f.providers.retry_provider import RetryProvider
 from config import Config
@@ -28,7 +26,6 @@ class MessageContext:
     rpl_to: Optional[int] = None
     images: List[bytes] = None
 
-
     def to_dict(self) -> dict:
         return {
             'role': self.role,
@@ -40,15 +37,12 @@ class MessageContext:
         }
 
 class ChatAssistant:
-    tg: TelegramClient
-    bot_id: int
-
-    def __init__(self, config: Config, tg: TelegramClient):
+    def __init__(self, config: Config):
         """Initialize ChatAssistant with configuration."""
         self.config = config
-        self.tg = tg
         self.g4f_client = self._initialize_client()
         self.message_locks: Dict[int, asyncio.Lock] = {}  # One message at a time per user
+        self.bot_id: Optional[int] = None
         logger.info("ChatAssistant initialized successfully")
 
     def _initialize_client(self) -> AsyncClient:
@@ -91,25 +85,25 @@ class ChatAssistant:
 
         return provider_classes
 
-    async def handle_message(self, message: Message, images: List[bytes], conversation_context: List[dict]) -> None:
+    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE, images: List[bytes], conversation_context: List[dict]) -> None:
         """Handle chat message and generate response."""
+        message = update.message
         if not self._is_valid_message(message):
             return
 
         try:
-            # Use message action instead of ChatAction
-            async with self.tg.action(message.chat_id, 'typing'):
-                await self._generate_and_send_response(message, images, conversation_context)
+            await context.bot.send_chat_action(chat_id=message.chat_id, action='typing')
+            await self._generate_and_send_response(message, context, images, conversation_context)
         except Exception as e:
-            await self._handle_chat_error(message, e)
+            await self._handle_chat_error(message, context, e)
 
     def _is_valid_message(self, message: Message) -> bool:
         """Check if message should be processed."""
-        return message.sender and not message.via_bot
+        return message.from_user and not message.via_bot
 
-    async def _generate_and_send_response(self, message: Message, images: List[bytes], conversation_context: List[MessageContext]) -> None:
+    async def _generate_and_send_response(self, message: Message, context: ContextTypes.DEFAULT_TYPE, images: List[bytes], conversation_context: List[MessageContext]) -> None:
         """Generate and send AI response."""
-        user_id = message.sender_id
+        user_id = message.from_user.id
         logger.debug(f"Processing message from user {user_id} with {len(images)} images and {len(conversation_context)} context messages")
         
         message_text = self._extract_message_text(message)
@@ -117,24 +111,17 @@ class ChatAssistant:
         
         if not message_text and not images:
             logger.debug("Empty message detected, sending help response")
-            await self._send_empty_message_response(message)
+            await self._send_empty_message_response(message, context)
             return
 
         chat_messages = await self._build_chat_messages(message_text, images, conversation_context, message)
         logger.debug(f"Built conversation context with {len(chat_messages)} messages")
         
-        await self._send_ai_response(chat_messages, message)
+        await self._send_ai_response(chat_messages, message, context)
 
     def _extract_message_text(self, message: Message) -> str:
         """Extract and clean message text."""
-        text = message.text or message.raw_text or ""
-        #quote = message.quote and message.quote.text or "" # Not supported in telethon 1.38.1 
-
-        #if quote:
-        #    # Add markdown quote formatting
-        #    text = f"> {quote}\n\n{text}"
-
-        return text.strip()
+        return message.text or ""
 
     async def _build_chat_messages(self, message_text: str, images: List[str], conversation_context: List[MessageContext], message: Message) -> List[MessageContext]:
         """Build complete message context for AI."""
@@ -162,33 +149,23 @@ class ChatAssistant:
 
     async def _create_user_message(self, message: Message, custom_text: str, images: List[bytes] = []) -> MessageContext:
         """Create user message context with sanitized text."""
-        logger.debug(f"Creating user message context for message_id={message.id}")
+        logger.debug(f"Creating user message context for message_id={message.message_id}")
 
-        my_id = self.bot_id == message.sender_id
-        sender: User | Channel | None = message.sender
+        my_id = self.bot_id == message.from_user.id
+        sender: User = message.from_user
 
-        text = custom_text if custom_text is not None else (message.text or message.raw_text or "")
+        text = custom_text if custom_text is not None else message.text or ""
         role = "assistant" if my_id else "user"
 
-        # Sanitize name at creation
-        if my_id:
-            name = "Assistant (you)"
-        elif isinstance(sender, User):
-            first = sender.first_name or ''
-            last = sender.last_name or ''
-            name = f"{first} {last}".strip()
-        elif isinstance(sender, Channel):
-            name = sender.title or "Unknown Channel"
-        else:
-            name = "Unknown"
+        name = "Assistant (you)" if my_id else f"{sender.first_name or ''} {sender.last_name or ''}".strip()
 
         context = MessageContext(
             role=role,
             content=text,
             name=name,
-            tag=f"@{sender.username}" if sender and sender.username else None,
-            msg_id=message.id,
-            rpl_to=message.reply_to.reply_to_msg_id if message.reply_to else None,
+            tag=sender.username,
+            msg_id=message.message_id,
+            rpl_to=message.reply_to_message.message_id if message.reply_to_message else None,
             time=message.date.timestamp()
         )
 
@@ -201,16 +178,14 @@ class ChatAssistant:
             self.message_locks[user_id] = asyncio.Lock()
         return self.message_locks[user_id]
 
-    async def _send_ai_response(self, messages: List[MessageContext], message: Message) -> None:
+    async def _send_ai_response(self, messages: List[MessageContext], message: Message, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Process GPT response and send it to the user."""
-        user_id = message.sender_id
+        user_id = message.from_user.id
         
         lock = await self._get_sender_lock(user_id)
         async with lock:  # Ensure only one message at a time per user
-            typing_task = None
             try:
-                # Start typing task outside the action context to cover the entire process
-                typing_task = asyncio.create_task(self._show_typing_indicator(message))
+                await context.bot.send_chat_action(chat_id=message.chat_id, action='typing')
                 
                 # Convert messages to G4F format
                 g4f_messages = [msg.to_dict() for msg in messages]
@@ -226,113 +201,30 @@ class ChatAssistant:
 
                 if response and response.choices:
                     assistant_response = response.choices[0].message.content
-                    await message.reply(assistant_response)
+                    await message.reply_text(assistant_response)
                     logger.debug("Sent response to user")
                 else:
                     raise ValueError("No valid response received")
 
             except Exception as e:
                 logger.error(f"AI response error for user {user_id}: {str(e)}", exc_info=True)
-                await message.reply("Извини, что-то пошло не так с обработкой запроса. Попробуй позже.")
-            finally:
-                if typing_task:
-                    typing_task.cancel()
-                    try:
-                        await typing_task
-                    except asyncio.CancelledError:
-                        pass
+                await message.reply_text("Извини, что-то пошло не так с обработкой запроса. Попробуй позже.")
 
-    async def _show_typing_indicator(self, message: Message):
-        """Keep sending typing status until cancelled."""
-        try:
-            while True:
-                async with message.client.action(message.chat_id, 'typing'):
-                    await asyncio.sleep(4.0)  # Slightly less than Telegram's 5-second limit
-        except asyncio.CancelledError:
-            pass
-
-    async def get_conversation_context(self, message: Message) -> List[MessageContext]:
-        """Get conversation context from reply chain and nearby messages."""
-        logger.debug(f"Getting conversation context for message {message.id}")
-        context_messages: List[MessageContext] = []
-        max_context = self.config.chat.max_history - 1
-        
-        # Get reply chain first
-        if message.reply_to:
-            reply_chain = await self._get_reply_chain(message, max_context // 2)
-            context_messages.extend(reply_chain)
-
-        # Get nearby messages to fill remaining context
-        remaining_context = max_context - len(context_messages)
-        if remaining_context > 0:
-            nearby_messages = await self._get_nearby_messages(message, remaining_context)
-            context_messages.extend(nearby_messages)
-
-        # Sort messages by timestamp to maintain conversation flow
-        context_messages.sort(key=lambda x: x.time)
-        logger.debug(f"Retrieved {len(context_messages)} context messages")
-
-        # Remove any message that is newer than the current message
-        context_messages = [msg for msg in context_messages if msg.time < message.date.timestamp()]
-
-        return context_messages
-
-    async def _get_reply_chain(self, message: Message, max_depth: int) -> List[MessageContext]:
-        """Get context from reply chain."""
-        context_messages: List[MessageContext] = []
-        current_message = message
-        depth = 0
-        
-        while current_message.reply_to and depth < max_depth:
-            reply_to = await current_message.get_reply_message()
-            if not reply_to:
-                break
-                
-            logger.debug(f"Adding message to context: {reply_to.id}")
-            msg_context = await self._create_user_message(reply_to, None)
-            context_messages.insert(0, msg_context)
-            current_message = reply_to
-            depth += 1
-
-        return context_messages
-
-    async def _get_nearby_messages(self, message: Message, limit: int) -> List[MessageContext]:
-        """Get recent messages from the same chat."""
-        context_messages: List[MessageContext] = []
-        
-        try:
-            # Get messages before the current one
-            async for msg in self.tg.iter_messages(
-                message.chat_id,
-                limit=limit,
-                max_id=message.id,
-                reverse=True  # Get in chronological order
-            ):
-                if msg is Message and msg.id != message.id:  # Skip current message
-                    msg_context = await self._create_user_message(msg, None)
-                    context_messages.append(msg_context)
-                    logger.debug(f"Added nearby message: {msg.id}")
-                    
-        except Exception as e:
-            logger.error(f"Error getting nearby messages: {e}")
-
-        return context_messages
-
-    async def _handle_chat_error(self, message: Message, error: Exception) -> None:
+    async def _handle_chat_error(self, message: Message, context: ContextTypes.DEFAULT_TYPE, error: Exception) -> None:
         """Handle errors during message processing."""
         logger.error("Error in chat handling: %s", str(error), exc_info=True)
-        await message.reply("Извини, произошла ошибка при обработке сообщения.")
+        await message.reply_text("Извини, произошла ошибка при обработке сообщения.")
 
-    async def _send_empty_message_response(self, message: Message) -> None:
+    async def _send_empty_message_response(self, message: Message, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Send help prompt for empty messages."""
         logger.debug("Empty message, sending help prompt")
-        async with message.client.action(message.chat_id, 'typing'):
-            help_text = "Мммм... чем могу помочь?"
-            await message.reply(help_text)
+        await context.bot.send_chat_action(chat_id=message.chat_id, action='typing')
+        help_text = "Мммм... чем могу помочь?"
+        await message.reply_text(help_text)
 
     def clear_history(self):
         """Clear chat history."""
-        self.chat_history.clear()
+        self.chat_history = []
 
     def set_bot_id(self, bot_id: int):
         """Set bot ID for message filtering."""

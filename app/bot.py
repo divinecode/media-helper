@@ -1,3 +1,4 @@
+from io import BytesIO
 import re
 import asyncio
 import logging
@@ -10,7 +11,7 @@ from config import Config
 from telethon import TelegramClient, events, connection
 from telethon.events import NewMessage, CallbackQuery
 from telethon.tl.custom import Message
-from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
+from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, DocumentAttributeVideo, DocumentAttributeAudio, DocumentAttributeFilename
 from assistant import ChatAssistant
 
 logger = logging.getLogger(__name__)
@@ -210,10 +211,7 @@ class VideoDownloadBot:
         try:
             downloader = next((d for d in self.downloaders if d.can_handle(url)), None)
             if not downloader:
-                await self.client.edit_message(
-                    entity=status_message,
-                    text="Анлак, я не умею скачивать контент с этого ресурса!"
-                )
+                await self.client.edit_message(status_message, "Анлак, я не умею скачивать контент с этого ресурса!")
                 return
                 
             download_result = await asyncio.wait_for(
@@ -222,16 +220,10 @@ class VideoDownloadBot:
             )
             
             if not download_result:
-                await self.client.edit_message(
-                    entity=status_message,
-                    text="Анлак, не получилось скачать контент."
-                )
+                await self.client.edit_message(status_message, "Анлак, не получилось скачать контент.")
                 return
             
-            await self.client.edit_message(
-                entity=status_message,
-                text="Опаааа! Работяги завершили работу. Обрабатываем контент..."
-            )
+            await self.client.edit_message(status_message, "Опаааа! Работяги завершили работу. Обрабатываем контент...")
             
             # Convert to MediaItems
             media_items = [
@@ -248,16 +240,10 @@ class VideoDownloadBot:
 
         except asyncio.TimeoutError:
             logger.error("Operation timed out")
-            await self.client.edit_message(
-                entity=status_message,
-                text="Анлак, действие заняло слишком много времени. Попробуй позже."
-            )
+            await self.client.edit_message(status_message, "Анлак, действие заняло слишком много времени. Попробуй позже.")
         except Exception as e:
             logger.error(f"Error handling download: {e}", exc_info=True)
-            await self.client.edit_message(
-                entity=message,
-                text="Анлак, произошла ошибка. Попробуй позже."
-            )
+            await self.client.edit_message(message, "Анлак, произошла ошибка. Попробуй позже.")
 
     async def _send_media_items(
         self,
@@ -279,51 +265,82 @@ class VideoDownloadBot:
             if not processed_data:
                 continue
 
+            # Create file-like object for the processed data
+            file = BytesIO(processed_data)
+            
             if item.media_type == MediaType.AUDIO:
-                audio_items.append((processed_data, item.caption))
+                # Set up audio attributes
+                attributes = [
+                    DocumentAttributeAudio(
+                        duration=0,  # Duration will be auto-detected
+                        voice=True  # Mark as voice message
+                    ),
+                    DocumentAttributeFilename(
+                        file_name='audio.ogg'
+                    )
+                ]
+                audio_items.append({
+                    'file': file,
+                    'attributes': attributes,
+                    'caption': item.caption
+                })
             elif item.media_type in (MediaType.VIDEO, MediaType.PHOTO):
+                # For videos, add streaming and other attributes
+                attributes = []
+                if item.media_type == MediaType.VIDEO:
+                    attributes.extend([
+                        DocumentAttributeVideo(
+                            duration=0,  # Duration will be auto-detected
+                            w=0,  # Width will be auto-detected
+                            h=0,  # Height will be auto-detected
+                            supports_streaming=True
+                        ),
+                        DocumentAttributeFilename(
+                            file_name='video.mp4'
+                        )
+                    ])
+                
                 photos_and_videos.append({
-                    'file': processed_data,
+                    'file': file,
                     'caption': item.caption,
                     'force_document': item.media_type == MediaType.VIDEO,
-                    'video': item.media_type == MediaType.VIDEO,
+                    'attributes': attributes if attributes else None,
                     'supports_streaming': item.media_type == MediaType.VIDEO
                 })
 
-        # Send photos and videos as media group if multiple
+        # Send photos and videos
         if photos_and_videos:
-            if len(photos_and_videos) > 1:
-                # For multiple files, use send_file with list
-                await self.client.send_file(
-                    entity=message.chat_id,
-                    file=[item['file'] for item in photos_and_videos],
-                    caption=[item['caption'] for item in photos_and_videos],
-                    reply_to=message.id,
-                    force_document=photos_and_videos[0]['force_document'],
-                    supports_streaming=photos_and_videos[0]['supports_streaming']
-                )
-            else:
-                # For single file, use simpler call
-                item = photos_and_videos[0]
-                await self.client.send_file(
-                    entity=message.chat_id,
-                    file=item['file'],
-                    caption=item['caption'],
-                    reply_to=message.id,
-                    force_document=item['force_document'],
-                    supports_streaming=item['supports_streaming']
-                )
+            # For multiple files, send as group
+            files = []
+            for item in photos_and_videos:
+                file_dict = {
+                    'file': item['file'],
+                    'force_document': item['force_document']
+                }
+                if item.get('attributes'):
+                    file_dict['attributes'] = item['attributes']
+                if item.get('supports_streaming'):
+                    file_dict['supports_streaming'] = item['supports_streaming']
+                files.append(file_dict)
 
-        # Send audio files separately
-        for audio_data, caption in audio_items:
+            captions = [item['caption'] for item in photos_and_videos if item['caption']]
             await self.client.send_file(
                 entity=message.chat_id,
-                file=audio_data,
-                caption=caption,
-                voice_note=True,  # Mark as voice message
+                file=files,
+                caption=captions[0] if captions else None,
                 reply_to=message.id
             )
 
+        # Send audio files
+        for audio_item in audio_items:
+            await self.client.send_file(
+                entity=message.chat_id,
+                file=audio_item['file'],
+                caption=audio_item['caption'],
+                attributes=audio_item['attributes'],
+                reply_to=message.id
+            )
+        
     async def _process_media(
         self,
         media_item: MediaItem,
@@ -341,8 +358,8 @@ class VideoDownloadBot:
         # Check size limits first
         if size_mb > self.MAX_COMPRESS_SIZE_MB:
             await self.client.edit_message(
-                entity=status_message,
-                text=f"Анлак, видео слишком большое ({size_mb:.1f}MB) для обработки. Выбери видео поменьше."
+                status_message,
+                f"Анлак, видео слишком большое ({size_mb:.1f}MB) для обработки. Выбери видео поменьше."
             )
             return None
 
@@ -356,7 +373,7 @@ class VideoDownloadBot:
             compression_msg = "Применяем сжатие видео..."
             if size_mb > self.MAX_TELEGRAM_SIZE_MB:
                 compression_msg = f"Сжимаем большое видео размером {size_mb:.1f}MB..."
-            await self.client.edit_message(entity=status_message, text=compression_msg)
+            await self.client.edit_message(status_message, compression_msg)
 
             # Apply compression with force_compress for videos above threshold
             force_compress = size_mb > self.config.compression.default_compress_threshold_mb
@@ -368,10 +385,7 @@ class VideoDownloadBot:
             )
             
             if not compressed_data:
-                await self.client.edit_message(
-                    entity=status_message,
-                    text="Анлак, не удалось сжать видео. Выбери видео поменьше."
-                )
+                await self.client.edit_message(status_message, "Анлак, не удалось сжать видео. Выбери видео поменьше.")
                 return None
             
             compressed_size = len(compressed_data) / (1024 * 1024)
@@ -379,14 +393,14 @@ class VideoDownloadBot:
             
             if compressed_size > self.MAX_TELEGRAM_SIZE_MB:
                 await self.client.edit_message(
-                    entity=status_message,
-                    text=f"Анлак, даже после сжатия видео слишком большое ({compressed_size:.1f}MB). "
+                    status_message,
+                    f"Анлак, даже после сжатия видео слишком большое ({compressed_size:.1f}MB). "
                     "Выбери видео поменьше."
                 )
                 return None
                 
             if compressed_size < size_mb:
-                await self.client.edit_message(entity=status_message, text="Сжатие завершено, готовим к отправке...")
+                await self.client.edit_message(status_message, "Сжатие завершено, готовим к отправке...")
                 return compressed_data
             else:
                 logger.debug("Compression didn't reduce file size, using original")
