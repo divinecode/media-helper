@@ -83,34 +83,28 @@ class TikTokDownloader(VideoDownloader):
                 if not html_data:
                     return None
 
-                results = []
                 soup = BeautifulSoup(html_data, "html.parser")
                 logger.debug("Parsing HTML for content downloads")
 
                 # First try to get video download links
                 video_links = self._parse_download_links(html_data)
                 if video_links:
-                    await self._try_download_video(session, video_links[0], results)
-                else:
-                    # If no video, try to get both audio and photos as they usually come together
-                    logger.debug("No video links found, trying to find audio and photos")
+                    return await self._try_download_video(session, video_links[0])
+                
+                # If no video, try to get both audio and photos as they usually come together
+                logger.debug("No video links found, trying to find audio and photos")
                     
-                    # Try to get photos first
-                    await self._try_download_photos(session, soup, results)
-                    
-                    # Then try to get music from dl-action section
-                    music_link = soup.find("div", class_="dl-action").find("a", attrs={
-                        "class": "tik-button-dl button dl-success",
-                        "href": lambda h: h and "dl.snapcdn.app/get" in h
-                    })
+                photos: List[DownloadResult] = await self._try_download_photos(session, soup)
+                music: List[DownloadResult] = await self._try_download_music(session, soup)
+                logger.debug(f"Found {len(photos)} photos and {len(music)} music tracks")
 
-                    if music_link and music_link.get("href"):
-                        logger.debug(f"Found music link: {music_link['href']}")
-                        await self._try_download_music(session, music_link["href"], results)
-                    else:
-                        logger.debug("No music link found in the dl-action section")
+                # It is slideshow, generate video!
+                if photos and len(music) == 1:
+                    slideshow: DownloadResult = await self._create_slideshow_with_music(photos, music[0])
+                    if slideshow:
+                        return [slideshow]
 
-                return results if results else None
+                return photos + music
 
         except Exception as e:
             logger.error(f"Error in tikdownloader method: {e}", exc_info=True)
@@ -120,8 +114,7 @@ class TikTokDownloader(VideoDownloader):
         self,
         session: aiohttp.ClientSession,
         link_info: DownloadInfo,
-        results: List[DownloadResult]
-    ) -> None:
+    ) -> List[DownloadResult]:
         """Try to download video content."""
         try:
             logger.debug(f"Attempting video download from URL: {link_info.download_url}")
@@ -132,20 +125,163 @@ class TikTokDownloader(VideoDownloader):
             ) as response:
                 if response.status == 200:
                     video_data = await response.read()
-                    results.append(DownloadResult(
-                        data=video_data,
-                        media_type=MediaType.VIDEO
-                    ))
+                    return [DownloadResult(link_info.download_url, video_data)]
+            
+            return []
         except Exception as e:
             logger.debug(f"Video download failed: {e}")
+
+    async def _create_slideshow_with_music(
+        self,
+        images: List[DownloadResult],
+        audio: DownloadResult
+    ) -> Optional[DownloadResult]:
+        """Create a slideshow video from images with music using FFmpeg."""
+        try:
+            import tempfile
+            import os
+            from PIL import Image
+            import io
+            slideshow_config = self.config.slideshow
+            
+            # Parse configured resolution
+            max_width, max_height = map(int, slideshow_config.resolution.split(':'))
+            
+            # Determine largest image dimensions
+            max_img_width = 0
+            max_img_height = 0
+            
+            # First pass to determine largest dimensions
+            for image in images:
+                with Image.open(io.BytesIO(image.data)) as img:
+                    width, height = img.size
+                    max_img_width = max(max_img_width, width)
+                    max_img_height = max(max_img_height, height)
+            
+            # Scale dimensions to fit within config bounds while maintaining aspect ratio
+            scale = min(max_width / max_img_width, max_height / max_img_height)
+            target_width = int(max_img_width * scale)
+            target_height = int(max_img_height * scale)
+            if (target_height % 2) != 0:
+                target_height -= 1
+            if (target_width % 2) != 0:
+                target_width -= 1
+            
+            # Create temporary directory for processing
+            with tempfile.TemporaryDirectory() as temp_dir:
+                # Save and scale images
+                image_paths = []
+                for i, image in enumerate(images):
+                    # Open and scale image
+                    with Image.open(io.BytesIO(image.data)) as img:
+                        # Calculate scale for this specific image
+                        img_width, img_height = img.size
+                        img_scale = min(target_width / img_width, target_height / img_height)
+                        new_width = int(img_width * img_scale)
+                        new_height = int(img_height * img_scale)
+                        
+                        # Resize image
+                        resized_img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                        
+                        # Create new image with padding
+                        padded_img = Image.new('RGB', (target_width, target_height), slideshow_config.background_color)
+                        
+                        # Calculate padding to center the image
+                        left_padding = (target_width - new_width) // 2
+                        top_padding = (target_height - new_height) // 2
+                        
+                        # Paste resized image onto padded background
+                        padded_img.paste(resized_img, (left_padding, top_padding))
+                        
+                        # Save processed image
+                        image_path = os.path.join(temp_dir, f'image_{i:03d}.jpg')
+                        padded_img.save(image_path, 'JPEG', quality=95)
+                        image_paths.append(image_path)
+                
+                # Save audio
+                audio_path = os.path.join(temp_dir, 'audio.mp3')
+                with open(audio_path, 'wb') as f:
+                    f.write(audio.data)
+                
+                # Get audio duration using FFprobe
+                duration_cmd = f'ffprobe -i {audio_path} -show_entries format=duration -v quiet -of csv="p=0"'
+                process = await asyncio.create_subprocess_shell(
+                    duration_cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, _ = await process.communicate()
+                audio_duration = float(stdout.decode().strip())
+                
+                # Calculate how many times to loop the images to match audio duration
+                frame_duration = float(slideshow_config.fps.split('/')[1])  # Get seconds per frame from FPS
+                total_image_duration = frame_duration * len(image_paths)
+                loops_needed = int(audio_duration / total_image_duration) + 1
+                
+                # Create input file for FFmpeg with loops
+                input_txt = os.path.join(temp_dir, 'input.txt')
+                with open(input_txt, 'w') as f:
+                    for _ in range(loops_needed):
+                        for img_path in image_paths:
+                            f.write(f"file '{img_path}'\n")
+                            f.write(f"duration {frame_duration}\n")
+                
+                # Output video path
+                output_path = os.path.join(temp_dir, 'output.mp4')
+                
+                # FFmpeg command for creating slideshow with music
+                cmd = (
+                    f'ffmpeg -y -f concat -safe 0 -i {input_txt} '
+                    f'-i {audio_path} '
+                    f'-vf "fps={slideshow_config.fps},format=yuv420p" '
+                    f'-c:v {slideshow_config.video_codec} '
+                    f'-preset {slideshow_config.video_preset} '
+                    f'-crf {slideshow_config.video_crf} '
+                    f'-c:a {slideshow_config.audio_codec} '
+                    f'-b:a {slideshow_config.audio_bitrate} '
+                    f'-shortest '  # End when audio finishes
+                    f'{output_path}'
+                )
+                
+                # Execute FFmpeg command
+                process = await asyncio.create_subprocess_shell(
+                    cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                
+                stdout, stderr = await process.communicate()
+                
+                if process.returncode != 0:
+                    logger.error(f"FFmpeg error: {stderr.decode()}")
+                    return None
+                
+                # Read the output video
+                with open(output_path, 'rb') as f:
+                    return DownloadResult(f.read(), MediaType.VIDEO)
+                    
+        except Exception as e:
+            logger.error(f"Error creating slideshow: {e}", exc_info=True)
+        return None
 
     async def _try_download_music(
         self,
         session: aiohttp.ClientSession,
-        url: str,
-        results: List[DownloadResult]
-    ) -> None:
+        soup: BeautifulSoup,
+    ) -> List[DownloadResult]:
         """Try to download music content."""
+
+        # Then try to get music from dl-action section
+        music_link = soup.find("div", class_="dl-action").find("a", attrs={
+            "class": "tik-button-dl button dl-success",
+            "href": lambda h: h and "dl.snapcdn.app/get" in h
+        })
+
+        if not music_link or not music_link.get("href"):
+            return []
+        
+        url = music_link["href"]
+
         try:
             headers = {
                 "User-Agent": self.headers["User-Agent"],
@@ -158,6 +294,8 @@ class TikTokDownloader(VideoDownloader):
                 "Sec-Fetch-Site": "cross-site",
             }
             logger.debug(f"Attempting music download from URL: {url}")
+
+            results: List[DownloadResult] = []
             async with session.get(url, headers=headers, timeout=30) as response:
                 if response.status == 200:
                     music_data = await response.read()
@@ -172,6 +310,8 @@ class TikTokDownloader(VideoDownloader):
                 else:
                     logger.debug(f"Music download failed with status: {response.status}")
                     logger.debug(await response.text())
+            
+            return results
         except Exception as e:
             logger.debug(f"Music download failed: {e}", exc_info=True)
 
@@ -179,8 +319,7 @@ class TikTokDownloader(VideoDownloader):
         self,
         session: aiohttp.ClientSession,
         soup: BeautifulSoup,
-        results: List[DownloadResult]
-    ) -> None:
+    ) -> List[DownloadResult]:
         """Try to download photo content."""
         try:
             photo_links = soup.find_all("a", attrs={
@@ -188,6 +327,7 @@ class TikTokDownloader(VideoDownloader):
                 "href": lambda h: h and "dl.snapcdn.app/get" in h
             })
             
+            results: List[DownloadResult] = []
             for link in photo_links:
                 try:
                     async with session.get(
@@ -204,7 +344,8 @@ class TikTokDownloader(VideoDownloader):
                 except Exception as e:
                     logger.debug(f"Photo download failed: {e}")
                     continue
-
+            
+            return results
         except Exception as e:
             logger.debug(f"Error processing photos: {e}")
 

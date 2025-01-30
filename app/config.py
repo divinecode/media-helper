@@ -94,6 +94,20 @@ class CompressionConfig(BaseConfig):
     second_pass_audio_bitrate: int = field(default=96, metadata={"env_key": "SECOND_PASS_AUDIO_BITRATE"})
 
 @dataclass
+class SlideshowConfig(BaseConfig):
+    # Video settings
+    resolution: str = field(default="1920:1080", metadata={"env_key": "SLIDESHOW_RESOLUTION"})
+    fps: str = field(default="1/4", metadata={"env_key": "SLIDESHOW_FPS"})
+    background_color: str = field(default="black", metadata={"env_key": "SLIDESHOW_BG_COLOR"})
+    
+    # Encoding settings
+    video_codec: str = field(default="libx264", metadata={"env_key": "SLIDESHOW_VIDEO_CODEC"})
+    video_preset: str = field(default="veryfast", metadata={"env_key": "SLIDESHOW_VIDEO_PRESET"})
+    video_crf: int = field(default=23, metadata={"env_key": "SLIDESHOW_VIDEO_CRF"})
+    audio_codec: str = field(default="aac", metadata={"env_key": "SLIDESHOW_AUDIO_CODEC"})
+    audio_bitrate: str = field(default="128k", metadata={"env_key": "SLIDESHOW_AUDIO_BITRATE"})
+
+@dataclass
 class Config(BaseConfig):
     # Required parameters with metadata
     bot_token: str = field(default="", metadata={"env_key": "BOT_TOKEN"})
@@ -135,6 +149,7 @@ class Config(BaseConfig):
     # Config objects
     compression: CompressionConfig = field(default_factory=CompressionConfig)
     chat: ChatConfig = field(default_factory=ChatConfig)
+    slideshow: SlideshowConfig = field(default_factory=SlideshowConfig)
 
     @classmethod
     def from_env(cls) -> 'Config':
@@ -143,4 +158,5 @@ class Config(BaseConfig):
         base_config = super().from_env()
         base_config.compression = CompressionConfig.from_env()
         base_config.chat = ChatConfig.from_env()
+        base_config.slideshow = SlideshowConfig.from_env()
         return base_config
