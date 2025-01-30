@@ -111,7 +111,6 @@ class SlideshowConfig(BaseConfig):
 class Config(BaseConfig):
     # Required parameters with metadata
     bot_token: str = field(default="", metadata={"env_key": "BOT_TOKEN"})
-    bot_username: str = field(default="", metadata={"env_key": "BOT_USERNAME"})
     allowed_usernames: List[str] = field(
         default_factory=list,
         metadata={"env_key": "ALLOWED_USERNAMES"}

@@ -112,7 +112,7 @@ class ChatAssistant:
 
     async def _get_message_images(self, message: Message, limit: int = 1) -> List[bytes]:
         """Extract images from message and convert to base64."""
-        identifiers = []
+        identifiers: List[str] = []
 
         # Check photos in message
         if message.photo:
@@ -123,7 +123,7 @@ class ChatAssistant:
         if message.document and message.document.mime_type.startswith('image/'):
             identifiers.append(message.document.file_id)
 
-        logger.debug(f"Total found images in message {len(identifiers)}, but will be capped to {limit}")
+        logger.debug(f"Total found images in message {len(identifiers)}, but will be capped to {limit}: {identifiers}")
         identifiers = identifiers[:limit]
 
         files = [(await message.get_bot().get_file(id)) for id in identifiers]

@@ -79,7 +79,6 @@ class VideoDownloadBot:
         logger.debug("Initializing downloaders")
         await self._initialize_downloaders()
 
-
     async def _initialize_downloaders(self):
         """Initialize all supported downloaders."""
         from downloaders.tiktok import TikTokDownloader
@@ -102,7 +101,6 @@ class VideoDownloadBot:
             or update.effective_user.id == self.bot_id \
             or update.effective_user.is_bot \
             or not update.effective_message \
-            or not update.message \
             or update.edited_message:
             return
 
@@ -325,14 +323,21 @@ class VideoDownloadBot:
     def _bot_was_mentioned(self, update: Update) -> bool:
         """Check if the bot was mentioned in the message."""
         message = update.effective_message
-        if not message or not message.entities:
+        if not message:
             return False
+        
+        bot_mention = f"@{update.get_bot().username}".lower()
+        if not message.entities and message.caption:
+            return message.caption.lower().find(bot_mention) != -1
             
-        return any(
-            entity.type == "mention" and 
-            message.parse_entity(entity).lower() == f"@{self.config.bot_username}".lower()
-            for entity in message.entities
-        )
+        if message.entities:
+            return any(
+                entity.type == "mention" and 
+                message.parse_entity(entity).lower() == bot_mention
+                for entity in message.entities
+            )
+        
+        return False
         
     def _extract_urls(self, text: str) -> List[str]:
         """Extract URLs from message text."""
