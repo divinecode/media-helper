@@ -3,7 +3,7 @@ import logging
 from typing import List, Dict, Optional
 import importlib
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from telegram import Update, Message, User, Chat, PhotoSize
 from telegram.ext import ContextTypes
 from telegram.constants import ChatAction
@@ -24,7 +24,9 @@ class MessageContext:
     msg_id: int
     time: float
     rpl_to: Optional[int] = None
-    images: List[bytes] = None
+    images: List[bytes] = field(
+        default_factory=lambda: []
+    )
 
     def to_dict(self) -> dict:
         """Convert message context to dictionary format with formatted content."""
@@ -90,7 +92,7 @@ class ChatAssistant:
         """Handle chat message and generate response."""
         message = update.effective_message
         conversation_context = await self.get_conversation_context(message)
-        images = self._get_message_images(message)
+        images = await self._get_message_images(message)
 
         if not self._is_valid_message(message):
             return
@@ -108,20 +110,26 @@ class ChatAssistant:
             except Exception as e:
                 await self._handle_chat_error(message, context, e)
 
-    def _get_message_images(self, message: Message) -> List[str]:
+    async def _get_message_images(self, message: Message, limit: int = 1) -> List[bytes]:
         """Extract images from message and convert to base64."""
-        images = []
-        
+        identifiers = []
+
         # Check photos in message
         if message.photo:
             photo: PhotoSize = max(message.photo, key=lambda p: p.file_size)
-            images.append(photo.file_id)
+            identifiers.append(photo.file_id)
             
         # Check document attachments
         if message.document and message.document.mime_type.startswith('image/'):
-            images.append(message.document.file_id)
+            identifiers.append(message.document.file_id)
+
+        logger.debug(f"Total found images in message {len(identifiers)}, but will be capped to {limit}")
+        identifiers = identifiers[:limit]
+
+        files = [(await message.get_bot().get_file(id)) for id in identifiers]
+        downloaded = [bytes(await file.download_as_bytearray()) for file in files]
             
-        return images
+        return downloaded
 
     async def get_conversation_context(self, message: Message) -> List[MessageContext]:
         """Get conversation context from reply chain."""
@@ -175,14 +183,14 @@ class ChatAssistant:
 
         return text
 
-    async def _build_chat_messages(self, images: List[bytes], conversation_context: List[MessageContext], message: Message) -> List[dict]:
+    async def _build_chat_messages(self, images: List[bytes], conversation_context: List[MessageContext], message: Message) -> List[MessageContext]:
         """Build complete message context for AI."""
         logger.debug("Building chat messages context")
         messages = []
         
         if conversation_context:
             logger.debug(f"Adding {len(conversation_context)} context messages")
-            messages.extend([msg.to_dict() for msg in conversation_context])
+            messages.extend(conversation_context)
         
         messages.append(MessageContext(
             role="system",
@@ -191,11 +199,11 @@ class ChatAssistant:
             tag=None,
             msg_id=-1,
             time=datetime.now().timestamp()
-        ).to_dict())
+        ))
 
         current_context = await self._create_user_message(message, images)
         logger.debug(f"Created user message context: {current_context.to_dict()}")
-        messages.append(current_context.to_dict())
+        messages.append(current_context)
         
         return messages
 
@@ -246,18 +254,28 @@ class ChatAssistant:
         except asyncio.CancelledError:
             pass
 
-    async def _send_ai_response(self, messages: List[dict], message: Message, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _send_ai_response(self, messages: List[MessageContext], message: Message, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Process GPT response and send it to the user."""
+        if len(messages) < 1:
+            return
+
         user_id = message.from_user.id
         try:
             logger.debug(f"Requesting AI completion for user {user_id}")
-            for idx, msg in enumerate(messages):
+
+            messages_mapped = [msg.to_dict() for msg in messages]
+            images = messages[len(messages) - 1].images
+            image = None if not images else images[0]
+
+            for idx, msg in enumerate(messages_mapped):
                 logger.debug(f"Message {idx}: {msg}")
-            
+            logger.debug(f"Last message contains {len(images)} images")
+        
             response = await self.g4f_client.chat.completions.create(
                 model=self.config.chat.model,
-                messages=messages,
-                timeout=self.config.chat.timeout
+                messages=messages_mapped,
+                timeout=self.config.chat.timeout,
+                image=image
             )
 
             if response and response.choices:
