@@ -43,16 +43,17 @@ class ChatAssistant:
     def __init__(self, config: Config):
         """Initialize ChatAssistant with configuration."""
         self.config = config
-        self.g4f_client = self._initialize_client()
+        self.g4f_client = self._initialize_client(config.chat.providers)
+        self.g4f_vision_client = self._initialize_client(config.chat.vision_providers)
+        logger.debug(f"g4f_client: {self.g4f_client}")
+        logger.debug(f"g4f_vision_client: {self.g4f_vision_client}")
         self.message_locks: Dict[int, asyncio.Lock] = {}
         self.bot_id: Optional[int] = None
         logger.info("ChatAssistant initialized successfully")
 
-    def _initialize_client(self) -> AsyncClient:
+    def _initialize_client(self, providers: List[str]) -> AsyncClient:
         """Initialize G4F client with providers."""
-        logger.debug("Initializing ChatAssistant with config: %s", self._get_config_debug_info())
-        provider_classes = self._load_providers()
-        
+        provider_classes = self._load_providers(providers)
         return AsyncClient(
             provider=RetryProvider(
                 providers=provider_classes,
@@ -60,19 +61,10 @@ class ChatAssistant:
             )
         )
 
-    def _get_config_debug_info(self) -> dict:
-        """Get configuration debug information."""
-        return {
-            'model': self.config.chat.model,
-            'timeout': self.config.chat.timeout,
-            'max_history': self.config.chat.max_history,
-            'providers': self.config.chat.providers
-        }
-
-    def _load_providers(self) -> List:
+    def _load_providers(self, providers: List[str]) -> List:
         """Load and initialize providers."""
         provider_classes = []
-        for provider_name in self.config.chat.providers:
+        for provider_name in providers:
             try:
                 provider_module = importlib.import_module("g4f.Provider")
                 provider_class = getattr(provider_module, provider_name)
@@ -82,9 +74,9 @@ class ChatAssistant:
                 logger.warning("Failed to load provider %s: %s", provider_name, e)
 
         if not provider_classes:
-            from g4f.Provider import ChatGptt, Blackbox
-            provider_classes = [ChatGptt, Blackbox]
-            logger.info("Using default providers: ChatGptt, Blackbox")
+            from g4f.Provider import Blackbox
+            provider_classes = [Blackbox]
+            logger.info("Using default providers: Blackbox")
 
         return provider_classes
 
@@ -92,7 +84,10 @@ class ChatAssistant:
         """Handle chat message and generate response."""
         message = update.effective_message
         conversation_context = await self.get_conversation_context(message)
+
         images = await self._get_message_images(message)
+        if len(images) < 1 and message.reply_to_message:
+            images = await self._get_message_images(message.reply_to_message)
 
         if not self._is_valid_message(message):
             return
@@ -110,6 +105,7 @@ class ChatAssistant:
             except Exception as e:
                 await self._handle_chat_error(message, context, e)
 
+
     async def _get_message_images(self, message: Message, limit: int = 1) -> List[bytes]:
         """Extract images from message and convert to base64."""
         identifiers: List[str] = []
@@ -122,6 +118,9 @@ class ChatAssistant:
         # Check document attachments
         if message.document and message.document.mime_type.startswith('image/'):
             identifiers.append(message.document.file_id)
+
+        if len(identifiers) < 1:
+            return []
 
         logger.debug(f"Total found images in message {len(identifiers)}, but will be capped to {limit}: {identifiers}")
         identifiers = identifiers[:limit]
@@ -271,20 +270,27 @@ class ChatAssistant:
                 logger.debug(f"Message {idx}: {msg}")
             logger.debug(f"Last message contains {len(images)} images")
         
-            response = await self.g4f_client.chat.completions.create(
-                model=self.config.chat.model,
+            client = self.g4f_vision_client if image else self.g4f_client
+            response = await client.chat.completions.create(
+                model=self.config.chat.vision_model if image else self.config.chat.model,
                 messages=messages_mapped,
                 timeout=self.config.chat.timeout,
                 image=image
             )
 
             if response and response.choices:
-                assistant_response = response.choices[0].message.content
-                await message.reply_text(
-                    assistant_response,
-                    reply_to_message_id=message.message_id
-                )
-                logger.debug("Sent response to user")
+                full: str = response.choices[0].message.content.strip()
+                logger.debug(f"Received model response: {full}")
+                if len(full) == 0:
+                    return
+                
+                chunks = self.split_text(full)
+                for chunk in chunks:
+                    await message.reply_text(
+                        text=chunk,
+                        reply_to_message_id=message.message_id
+                    )
+                    logger.debug("Sent response to user")
             else:
                 raise ValueError("No valid response received")
 
@@ -294,6 +300,28 @@ class ChatAssistant:
                 "Извини, что-то пошло не так с обработкой запроса. Попробуй позже.",
                 reply_to_message_id=message.message_id
             )
+
+    def split_text(self, text: str, max_length: str = 4096) -> List[str]:
+        chunks: List[str] = []
+        while text:
+            if len(text) <= max_length:
+                chunks.append(text)
+                break
+
+            # Try to split at the last '\n' within limit
+            split_idx = text.rfind('\n', 0, max_length)
+            if split_idx == -1:
+                # If no '\n' found, try to split at the last space
+                split_idx = text.rfind(' ', 0, max_length)
+                if split_idx == -1:
+                    # If no space found, force split at max_length
+                    split_idx = max_length
+
+            chunks.append(text[:split_idx])
+            text = text[split_idx:].lstrip()  # Remove leading newline or space in next chunk
+
+        return chunks
+
 
     async def _handle_chat_error(self, message: Message, context: ContextTypes.DEFAULT_TYPE, error: Exception) -> None:
         """Handle errors during message processing."""
