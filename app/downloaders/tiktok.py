@@ -124,10 +124,13 @@ class TikTokDownloader(VideoDownloader):
                 timeout=30
             ) as response:
                 if response.status == 200:
-                    video_data = await response.read()
-                    return [DownloadResult(link_info.download_url, video_data)]
-            
-            return []
+                    return [DownloadResult(
+                        data=await response.read(),
+                        media_type=MediaType.VIDEO
+                    )]
+                else:
+                    logger.error(f"Failed to download video from {link_info.download_url} with status {response.status} and message: {response.text}")
+                    return []
         except Exception as e:
             logger.debug(f"Video download failed: {e}")
 
