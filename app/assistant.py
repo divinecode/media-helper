@@ -1,15 +1,19 @@
 from datetime import datetime
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Set
 import importlib
 import asyncio
+import random
+import threading
+import time
 from dataclasses import dataclass, field
 from telegram import Update, Message, User, Chat, PhotoSize
 from telegram.ext import ContextTypes
 from telegram.constants import ChatAction
-from g4f.client import AsyncClient
+from g4f.client import AsyncClient, ChatCompletion
 from g4f.providers.retry_provider import RetryProvider
 from config import Config
+import httpx
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -43,23 +47,163 @@ class ChatAssistant:
     def __init__(self, config: Config):
         """Initialize ChatAssistant with configuration."""
         self.config = config
-        self.g4f_client = self._initialize_client(config.chat.providers)
-        self.g4f_vision_client = self._initialize_client(config.chat.vision_providers)
-        logger.debug(f"g4f_client: {self.g4f_client}")
-        logger.debug(f"g4f_vision_client: {self.g4f_vision_client}")
+        self.proxies: List[str] = []
+        self.failed_proxies: Dict[str, int] = {}  # Track failure count for each proxy
+        self.proxy_lock = threading.Lock()
+        self.last_proxy_refresh = 0
+        
+        self.g4f_client = None
+        self.g4f_vision_client = None
         self.message_locks: Dict[int, asyncio.Lock] = {}
         self.bot_id: Optional[int] = None
+
+    async def initialize(self):
+        """Asynchronously initialize the assistant."""
+        await self.refresh_clients()
         logger.info("ChatAssistant initialized successfully")
 
-    def _initialize_client(self, providers: List[str]) -> AsyncClient:
-        """Initialize G4F client with providers."""
+    async def refresh_clients(self):
+        """Initialize or refresh G4F clients with new proxies."""
+        await self._refresh_proxies()
+        proxies = None
+        
+        if self.config.chat.use_proxies:
+            proxy = await self._get_working_proxy()
+            if proxy:
+                proxies = {"all": proxy}
+                logger.debug(f"Using proxy: {proxy}")
+            else:
+                logger.warning("No working proxies available")
+        else:
+            logger.debug("Proxies disabled by configuration")
+            
+        self.g4f_client = self._initialize_client(self.config.chat.providers, proxies)
+        self.g4f_vision_client = self._initialize_client(self.config.chat.vision_providers, proxies)
+
+    def _initialize_client(self, providers: List[str], proxies: Optional[Dict[str, str]] = None) -> AsyncClient:
+        """Initialize G4F client with providers and proxy."""
         provider_classes = self._load_providers(providers)
+        
+        # Configure client with SSL verification and custom transport
+        transport = httpx.AsyncHTTPTransport(
+            verify=self.config.chat.verify_ssl,
+            retries=self.config.chat.provider_retries,
+        )
+        
         return AsyncClient(
             provider=RetryProvider(
                 providers=provider_classes,
                 shuffle=self.config.chat.shuffle_providers
-            )
+            ),
+            proxies=proxies,
+            timeout=self.config.chat.request_timeout,
+            transport=transport
         )
+
+    async def _validate_proxy(self, proxy: str) -> bool:
+        """Test a single proxy by making a simple request."""
+        transport = httpx.AsyncHTTPTransport(
+            verify=self.config.chat.verify_ssl,
+            retries=self.config.chat.proxy_validation_retries
+        )
+
+        client = AsyncClient(
+            provider=RetryProvider(
+                providers=self._load_providers(self.config.chat.providers),
+                shuffle=False  # Don't shuffle during validation
+            ),
+            proxies={"all": proxy},
+            timeout=self.config.chat.proxy_validation_timeout,
+            transport=transport
+        )
+
+        try:
+            response = await client.chat.completions.create(
+                model=self.config.chat.model,
+                messages=[{"role": "user", "content": "Reply with number 1"}],
+                timeout=self.config.chat.proxy_validation_timeout
+            )
+            
+            if response and response.choices:
+                answer = response.choices[0].message.content.strip()
+                return answer is not None
+                
+        except Exception as e:
+            logger.debug(f"Proxy validation failed for {proxy}: {str(e)}")
+            return False
+
+        return False
+
+    async def _validate_proxies(self, proxies: List[str]) -> List[str]:
+        """Validate a list of proxies in batches."""
+        valid_proxies = []
+        total = len(proxies)
+        batch_size = self.config.chat.proxy_validation_batch_size
+
+        for i in range(0, total, batch_size):
+            batch = proxies[i:i + batch_size]
+            tasks = [self._validate_proxy(proxy) for proxy in batch]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            for proxy, is_valid in zip(batch, results):
+                if isinstance(is_valid, bool) and is_valid:
+                    valid_proxies.append(proxy)
+                    
+            logger.debug(f"Validated {i + len(batch)}/{total} proxies, {len(valid_proxies)} valid so far")
+            
+        return valid_proxies
+
+    async def _refresh_proxies(self):
+        """Refresh proxy list if needed."""
+        current_time = time.time()
+        if current_time - self.last_proxy_refresh > self.config.chat.proxy_refresh_interval:
+            with self.proxy_lock:
+                if self.config.chat.use_proxies:
+                    from proxy_scraper import scrape_proxies
+                    scraped_proxies = await scrape_proxies()
+                    logger.info(f"Scraped {len(scraped_proxies)} proxies, validating...")
+                    
+                    self.proxies = await self._validate_proxies(scraped_proxies)
+                    self.failed_proxies.clear()
+                    self.last_proxy_refresh = current_time
+                    
+                    logger.info(f"Validation complete. {len(self.proxies)} valid proxies out of {len(scraped_proxies)}")
+                else:
+                    self.proxies = []
+                    self.failed_proxies.clear()
+                    logger.debug("Proxy usage is disabled")
+
+    async def _get_working_proxy(self) -> Optional[str]:
+        """Get a working proxy from the list."""
+        with self.proxy_lock:
+            # Filter out proxies that have failed too many times
+            available_proxies = [
+                p for p in self.proxies 
+                if self.failed_proxies.get(p, 0) < self.config.chat.max_proxy_fails
+            ]
+            
+            if not available_proxies:
+                # If no proxies available, try refreshing the list
+                await self._refresh_proxies()
+                available_proxies = [
+                    p for p in self.proxies 
+                    if self.failed_proxies.get(p, 0) < self.config.chat.max_proxy_fails
+                ]
+                
+                if not available_proxies:
+                    return None
+                    
+            return random.choice(available_proxies)
+
+    def _mark_proxy_failed(self, proxy: Optional[str]):
+        """Mark a proxy as failed and track failure count."""
+        if not proxy:
+            return
+            
+        with self.proxy_lock:
+            current_fails = self.failed_proxies.get(proxy, 0)
+            self.failed_proxies[proxy] = current_fails + 1
+            logger.debug(f"Marked proxy as failed: {proxy} (fails: {current_fails + 1})")
 
     def _load_providers(self, providers: List[str]) -> List:
         """Load and initialize providers."""
@@ -89,7 +233,7 @@ class ChatAssistant:
         if len(images) < 1 and message.reply_to_message:
             images = await self._get_message_images(message.reply_to_message)
 
-        if not self._is_valid_message(message):
+        if not self._is_valid_message(message) or (len(images) < 1 and len(message.text.strip()) < 1):
             return
 
         user_id = message.from_user.id
@@ -234,7 +378,7 @@ class ChatAssistant:
         try:
             while True:
                 try:
-                    await message.chat.send_action(ChatAction.TYPING)
+                    await message.chat.send_action(ChatAction.TYPING, message_thread_id=message.message_thread_id)
                     await asyncio.sleep(typing_interval)
                 except Exception as e:
                     if "message was deleted" in str(e).lower() or "not enough rights" in str(e).lower():
@@ -254,52 +398,75 @@ class ChatAssistant:
             pass
 
     async def _send_ai_response(self, messages: List[MessageContext], message: Message, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Process GPT response and send it to the user."""
+        """Process GPT response with proxy rotation on failure."""
         if len(messages) < 1:
             return
 
         user_id = message.from_user.id
-        try:
-            logger.debug(f"Requesting AI completion for user {user_id}")
+        retry_count = 0
+        last_error = None
+        messages_mapped = [msg.to_dict() for msg in messages]
+        images = messages[-1].images
+        image = images[0] if images else None
 
-            messages_mapped = [msg.to_dict() for msg in messages]
-            images = messages[len(messages) - 1].images
-            image = None if not images else images[0]
+        for idx, msg in enumerate(messages_mapped):
+            logger.debug(f"Message {idx}: {msg}")
+        logger.debug(f"Last message contains {len(images)} images")
 
-            for idx, msg in enumerate(messages_mapped):
-                logger.debug(f"Message {idx}: {msg}")
-            logger.debug(f"Last message contains {len(images)} images")
-        
-            client = self.g4f_vision_client if image else self.g4f_client
-            response = await client.chat.completions.create(
-                model=self.config.chat.vision_model if image else self.config.chat.model,
-                messages=messages_mapped,
-                timeout=self.config.chat.timeout,
-                image=image
-            )
-
-            if response and response.choices:
-                full: str = response.choices[0].message.content.strip()
-                logger.debug(f"Received model response: {full}")
-                if len(full) == 0:
-                    return
+        while retry_count < self.config.chat.retries:
+            logger.debug(f"Requesting AI completion for user {user_id}. Retries: {retry_count}")
+            try:
+                client = self.g4f_vision_client if image else self.g4f_client
+                current_proxy = client.get_proxy()
                 
-                chunks = self.split_text(full)
-                for chunk in chunks:
-                    await message.reply_text(
-                        text=chunk,
-                        reply_to_message_id=message.message_id
+                response: Optional[ChatCompletion] = None
+                try:
+                    response = await client.chat.completions.create(
+                        model=self.config.chat.vision_model if image else self.config.chat.model,
+                        messages=messages_mapped,
+                        timeout=self.config.chat.timeout,
+                        image=image
                     )
-                    logger.debug("Sent response to user")
-            else:
-                raise ValueError("No valid response received")
 
-        except Exception as e:
-            logger.error(f"AI response error for user {user_id}: {str(e)}", exc_info=True)
-            await message.reply_text(
-                "Извини, что-то пошло не так с обработкой запроса. Попробуй позже.",
-                reply_to_message_id=message.message_id
-            )
+                    if response and response.choices:
+                        full: str = response.choices[0].message.content.strip()
+                        if not full:
+                            return  # Keep original empty response handling
+                        
+                        chunks = self.split_text(full)
+                        for chunk in chunks:
+                            await message.reply_text(
+                                text=chunk,
+                                reply_to_message_id=message.message_id
+                            )
+                        return  # Success, exit the method
+                        
+                except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as e:
+                    logger.warning(f"Connection error with provider: {e}")
+                    self._mark_proxy_failed(current_proxy)
+                    raise  # Re-raise to trigger retry
+                    
+            except Exception as e:
+                last_error = e
+                logger.error(f"AI response error with proxy {current_proxy}: {str(e)}", exc_info=True)
+                self._mark_proxy_failed(current_proxy)
+                
+                retry_count += 1
+                if retry_count < self.config.chat.retries:
+                    await asyncio.sleep(self.config.chat.proxy_retry_delay)
+                    await self.refresh_clients()  # Get new client with new proxy
+                    continue
+                break  # All retries failed
+
+        # If we got here, all retries failed
+        error_msg = "Извини, все провайдеры сейчас недоступны. Попробуй позже."
+        if isinstance(last_error, (httpx.ConnectError, httpx.ConnectTimeout)):
+            error_msg = "Извини, есть проблемы с подключением к серверу. Попробуй позже."
+            
+        await message.reply_text(
+            error_msg,
+            reply_to_message_id=message.message_id
+        )
 
     def split_text(self, text: str, max_length: str = 4096) -> List[str]:
         chunks: List[str] = []

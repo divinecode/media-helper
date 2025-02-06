@@ -19,6 +19,7 @@ class VideoDownloadBot:
     bot_id: Optional[int] = None
 
     def __init__(self, config: Config):
+        """Initialize bot with configuration."""
         self.config = config
 
         self.temp_manager = TempManager(config.temp_dir)
@@ -75,6 +76,10 @@ class VideoDownloadBot:
 
         self.bot_id = (await bot.get_me()).id
         self.assistant.set_bot_id(self.bot_id)
+        
+        # Initialize assistant
+        await self.assistant.initialize()
+        
         self.config.temp_dir.mkdir(exist_ok=True)
         logger.debug("Initializing downloaders")
         await self._initialize_downloaders()

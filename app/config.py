@@ -15,7 +15,7 @@ class BaseConfig:
             env_key = field_info.metadata.get("env_key")
             if env_key:
                 env_value = os.getenv(env_key)
-                if env_value is not None:
+                if (env_value is not None):
                     field_values[field_info.name] = cls._convert_value(env_value, field_info.type)
         return cls(**field_values)
 
@@ -58,7 +58,7 @@ class ChatConfig(BaseConfig):
     )
     
     # Model configuration
-    model: str = field(default="deepseek-r1", metadata={"env_key": "CHAT_MODEL"})
+    model: str = field(default="gpt-4o", metadata={"env_key": "CHAT_MODEL"})
     vision_model: str = field(default="gpt-4o", metadata={"env_key": "CHAT_MODEL"})
     # Provider configuration
     providers: List[str] = field(
@@ -73,6 +73,24 @@ class ChatConfig(BaseConfig):
         default=True,
         metadata={"env_key": "CHAT_SHUFFLE_PROVIDERS"}
     )
+
+    retries: int = field(default=1, metadata={"env_key": "CHAT_REQUEST_RETRIES"})
+    request_timeout: int = field(default=1000 * 60 * 5, metadata={"env_key": "CHAT_REQUEST_TIMEOUT"})
+    provider_retries: int = field(default=1, metadata={"env_key": "CHAT_PROVIDER_RETRIES"})
+    
+    # SSL and connection settings
+    verify_ssl: bool = field(default=False, metadata={"env_key": "CHAT_VERIFY_SSL"})
+
+    # Proxy configuration
+    use_proxies: bool = field(default=False, metadata={"env_key": "CHAT_USE_PROXIES"})
+    proxy_refresh_interval: int = field(default=300, metadata={"env_key": "CHAT_PROXY_REFRESH_INTERVAL"})
+    proxy_retry_delay: int = field(default=1, metadata={"env_key": "CHAT_PROXY_RETRY_DELAY"})
+    max_proxy_fails: int = field(default=2, metadata={"env_key": "CHAT_MAX_PROXY_FAILS"})
+    
+    # Proxy validation settings
+    proxy_validation_timeout: int = field(default=10, metadata={"env_key": "CHAT_PROXY_VALIDATION_TIMEOUT"})
+    proxy_validation_retries: int = field(default=1, metadata={"env_key": "CHAT_PROXY_VALIDATION_RETRIES"})
+    proxy_validation_batch_size: int = field(default=50, metadata={"env_key": "CHAT_PROXY_VALIDATION_BATCH_SIZE"})
 
 @dataclass
 class CompressionConfig(BaseConfig):
