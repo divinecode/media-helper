@@ -8,7 +8,7 @@ from media_types import DownloadResult, MediaType, MediaItem
 from video_processor import VideoProcessor
 from config import Config
 from telegram.ext import ContextTypes, Application
-from telegram import Update, InputMediaPhoto, InputMediaVideo, Message, PhotoSize, Bot
+from telegram import Update, InputMediaPhoto, InputMediaVideo, Message, PhotoSize, Bot, MessageEntity
 from telegram.constants import ChatAction
 from assistant import ChatAssistant
 
@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
 class VideoDownloadBot:
+    MEDIA_BOT_TAG = "media_bot_message"  # Tag for identifying bot-generated media messages
     bot_id: Optional[int] = None
 
     def __init__(self, config: Config):
@@ -238,7 +239,17 @@ class VideoDownloadBot:
                 media_cls = InputMediaVideo if item.media_type == MediaType.VIDEO else InputMediaPhoto
                 photos_and_videos.append(media_cls(
                     media=processed_data,
-                    caption=item.caption
+                    caption=item.caption,
+                    has_spoiler=True,  # Add spoiler to prevent autoplay
+                    parse_mode=None,  # Disable markdown parsing
+                    caption_entities=[
+                        MessageEntity(
+                            type="custom_emoji",  # Using custom_emoji as a hack to store metadata
+                            offset=0,
+                            length=0,
+                            custom_emoji_id=self.MEDIA_BOT_TAG
+                        )
+                    ] if item.caption else None
                 ))
 
         # Send photos and videos as media group
@@ -254,7 +265,15 @@ class VideoDownloadBot:
                 audio=audio_data,
                 caption=caption,
                 title=caption or "Audio track",
-                reply_to_message_id=message.message_id
+                reply_to_message_id=message.message_id,
+                caption_entities=[
+                    MessageEntity(
+                        type="custom_emoji",
+                        offset=0,
+                        length=0,
+                        custom_emoji_id=self.MEDIA_BOT_TAG
+                    )
+                ] if caption else None
             )
 
     async def _process_media(

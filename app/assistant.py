@@ -7,7 +7,7 @@ import random
 import threading
 import time
 from dataclasses import dataclass, field
-from telegram import Update, Message, User, Chat, PhotoSize
+from telegram import Update, Message, User, Chat, PhotoSize, MessageEntity
 from telegram.ext import ContextTypes
 from telegram.constants import ChatAction
 from g4f.client import AsyncClient, ChatCompletion
@@ -290,7 +290,31 @@ class ChatAssistant:
 
     def _is_valid_message(self, message: Message) -> bool:
         """Check if message should be processed."""
-        return message.from_user and not message.via_bot
+        if not message.from_user or message.via_bot:
+            return False
+
+        def has_media_or_bot_tag(msg: Optional[Message]) -> bool:
+            """Check if message has media content or bot tag."""
+            if not msg:
+                return False
+                
+            # Check for bot tag in entities
+            entities = msg.caption_entities or msg.entities or []
+            if any(e.type == "custom_emoji" and e.custom_emoji_id == "media_bot_message" for e in entities):
+                return True
+
+            # Check for media content
+            return bool(
+                msg.video or 
+                msg.audio or 
+                msg.voice or 
+                msg.video_note or
+                (msg.document and msg.document.mime_type and
+                 any(mime in msg.document.mime_type for mime in ['video/', 'audio/']))
+            )
+
+        # Check both current message and the message being replied to
+        return not (has_media_or_bot_tag(message) or has_media_or_bot_tag(message.reply_to_message))
 
     async def _get_sender_lock(self, user_id: int) -> asyncio.Lock:
         """Get or create a lock for a specific sender."""
