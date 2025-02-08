@@ -1,50 +1,60 @@
-import asyncio
 import logging
 import sys
-from pathlib import Path
+from telegram.ext import Application, MessageHandler, filters
 from config import Config
 from bot import VideoDownloadBot
-from telethon.client import TelegramClient
 
 # Enable logging
 logging.basicConfig(
-    format="[%(levelname) 5s/%(asctime)s] %(name)s: %(message)s",
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 
-# Set higher logging level for httpx
+# Set higher logging level for httpx to avoid all GET and POST requests being logged
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
-async def main() -> None:
-    """Start the bot."""
-
-    # Create state directory
-    config = Config.from_env()
-    config.state_dir.mkdir(parents=True, exist_ok=True)
-    bot = VideoDownloadBot(config)
-
+async def post_init(application: Application) -> None:
+    """Initialize bot after application setup but before polling starts."""
     try:
-
-        logger.info("Starting bot...")
-        await bot.start()
-            
-        # Run until disconnected
-        await bot.client.run_until_disconnected()
-    except KeyboardInterrupt:
-        logger.info("Received keyboard interrupt")
+        bot = application.bot_data.get('bot_instance')
+        if bot:
+            await bot.initialize(application)
+            logger.info("Bot initialized successfully")
     except Exception as e:
-        logger.error(f"Critical error: {e}", exc_info=True)
-        return 1
-    finally:
-        await bot.stop()
+        logger.error(f"Error during post-initialization: {e}", exc_info=True)
+        sys.exit(1)
+
+def main() -> None:
+    """Start the bot."""
+    try:
+        config = Config.from_env()
+        bot = VideoDownloadBot(config)
+      
+        application = (
+            Application.builder()
+            .token(config.bot_token)
+            .read_timeout(config.read_timeout)
+            .write_timeout(config.write_timeout)
+            .connection_pool_size(config.connection_pool_size)
+            .pool_timeout(config.pool_timeout)
+            .post_init(post_init)
+            .build()
+        )
+
+        # Store bot instance for post_init
+        application.bot_data['bot_instance'] = bot
         
-    return 0
+        application.add_handler(MessageHandler(filters.ALL, bot.handle_message))
+        logger.info("Starting bot")
+        
+        # Run the bot until stopped
+        application.run_polling(drop_pending_updates=True)
+        
+    except Exception as e:
+        logger.error(f"Fatal error: {e}", exc_info=True)
+        sys.exit(1)
 
 if __name__ == "__main__":
-    try:
-        exit_code = asyncio.run(main())
-        sys.exit(exit_code)
-    except KeyboardInterrupt:
-        sys.exit(1)
+    main()

@@ -1,4 +1,4 @@
-from io import BytesIO
+#import os
 import re
 import asyncio
 import logging
@@ -6,158 +6,84 @@ from typing import Dict, List, Optional, Set
 from temp_manager import TempManager
 from media_types import DownloadResult, MediaType, MediaItem
 from video_processor import VideoProcessor
-from downloaders.base import VideoDownloader
 from config import Config
-from telethon import TelegramClient, events, connection
-from telethon.events import NewMessage, CallbackQuery
-from telethon.tl.custom import Message
-from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, DocumentAttributeVideo, DocumentAttributeAudio, DocumentAttributeFilename
+from telegram.ext import ContextTypes, Application
+from telegram import Update, InputMediaPhoto, InputMediaVideo, Message, PhotoSize, Bot, MessageEntity
+from telegram.constants import ChatAction
 from assistant import ChatAssistant
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
 class VideoDownloadBot:
-    downloaders: List[VideoDownloader]
+    MEDIA_BOT_TAG = "media_bot_message"  # Tag for identifying bot-generated media messages
+    bot_id: Optional[int] = None
 
     def __init__(self, config: Config):
-        """Initialize the bot with configuration."""
+        """Initialize bot with configuration."""
         self.config = config
-        
-        # Initialize Telethon client with proper proxy handling
 
-        client_params = {
-            'session': str('state/' + config.telegram.session),
-            'api_id': config.telegram.api_id,
-            'api_hash': config.telegram.api_hash,
-            'timeout': config.telegram.timeout,
-            'connection': connection.ConnectionTcpFull,
-            'auto_reconnect': True,
-            'retry_delay': 1
-        }
-
-        # Set MTProxy if configured
-        if config.telegram.get_mtproxy_config():
-            client_params.update({
-                'connection': connection.ConnectionTcpMTProxyRandomizedIntermediate,
-                'proxy': config.telegram.get_mtproxy_config()
-            })
-        # Set regular proxy if configured
-        elif config.telegram.get_proxy_config():
-            client_params['proxy'] = config.telegram.get_proxy_config()
-
-        self.client = TelegramClient(**client_params)
-        
-        # Initialize components and event handlers
-        self._setup_components()
-        self._setup_handlers()
-
-    def _setup_components(self) -> None:
-        """Initialize all bot components."""
-        self.temp_manager = TempManager(self.config.temp_dir)
-        self.video_processor = VideoProcessor(self.config, self.temp_manager)
-        self.assistant = ChatAssistant(self.config, self.client)
+        self.temp_manager = TempManager(config.temp_dir)
+        self.video_processor = VideoProcessor(config, self.temp_manager)
         self.downloaders = []
         
-        # Use compression config values
-        self.MAX_TELEGRAM_SIZE_MB = self.config.compression.max_telegram_size_mb
-        self.MAX_COMPRESS_SIZE_MB = self.config.compression.max_compress_size_mb
+        # Use compression config values instead of hardcoded ones
+        self.MAX_TELEGRAM_SIZE_MB = config.compression.max_telegram_size_mb
+        self.MAX_COMPRESS_SIZE_MB = config.compression.max_compress_size_mb
         
         # Add concurrency control
-        self.download_semaphore = asyncio.Semaphore(self.config.max_concurrent_downloads)
+        self.download_semaphore = asyncio.Semaphore(config.max_concurrent_downloads)
+        
+        # Track active users and their downloads
         self.active_downloads: Dict[int, Set[asyncio.Task]] = {}
         self.user_semaphores: Dict[int, asyncio.Semaphore] = {}
+        self.max_downloads_per_user = config.max_downloads_per_user
+        
+        # Add a task manager for message processing
         self.message_tasks: Dict[int, Set[asyncio.Task]] = {}
-        self.max_downloads_per_user = self.config.max_downloads_per_user
 
-    def _setup_handlers(self) -> None:
-        """Set up event handlers."""
-        @self.client.on(events.NewMessage())
-        async def handle_message(event: NewMessage.Event):
-            if not event.message:
-                return
+        # Replace G4F client initialization with ChatAssistant
+        self.assistant = ChatAssistant(config)
+
+    def get_user_semaphore(self, user_id: int) -> asyncio.Semaphore:
+        """Get or create a semaphore for a specific user."""
+        if user_id not in self.user_semaphores:
+            self.user_semaphores[user_id] = asyncio.Semaphore(self.max_downloads_per_user)
+        return self.user_semaphores[user_id]
+        
+    async def track_user_download(self, user_id: int, task: asyncio.Task):
+        """Track a user's download task."""
+        if user_id not in self.active_downloads:
+            self.active_downloads[user_id] = set()
+        self.active_downloads[user_id].add(task)
+        try:
+            await task
+        finally:
+            self.active_downloads[user_id].remove(task)
+            if not self.active_downloads[user_id]:
+                del self.active_downloads[user_id]
                 
-            try:
-                await self._handle_message(event.message)
-            except Exception as e:
-                logger.error(f"Error handling message: {e}", exc_info=True)
-
-        @self.client.on(events.CallbackQuery())
-        async def handle_callback(event: CallbackQuery.Event):
-            try:
-                await self._handle_callback(event)
-            except Exception as e:
-                logger.error(f"Error handling callback: {e}", exc_info=True)
-
-    async def start(self) -> None:
-        """Start the bot."""
-        
-        await self.client.start(
-            phone=lambda : "bot" if self.config.telegram.use_bot else self.config.telegram.phone_number,
-            password=lambda : self.config.telegram.password if not self.config.telegram.use_bot else None,
-            bot_token=self.config.telegram.bot_token if self.config.telegram.use_bot else None
-        )
-        
-        # Get bot info
-        me = await self.client.get_me()
-        if not me or not me.bot:
-            raise RuntimeError("This user account is not a bot!")
+    async def cancel_user_downloads(self, user_id: int):
+        """Cancel all active downloads for a user."""
+        if user_id in self.active_downloads:
+            tasks = self.active_downloads[user_id]
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             
-        self.assistant.set_bot_id(me.id)
-        logger.info(f"Bot authorized as @{me.username}")
+    async def initialize(self, application: Application):
+        """Initialize bot and create required directories."""
+        bot: Bot = application.bot
+
+        self.bot_id = (await bot.get_me()).id
+        self.assistant.set_bot_id(self.bot_id)
         
+        # Initialize assistant
+        await self.assistant.initialize()
+        
+        self.config.temp_dir.mkdir(exist_ok=True)
+        logger.debug("Initializing downloaders")
         await self._initialize_downloaders()
-
-    async def run(self):
-        """Run the bot."""
-        await self.start()
-        logger.info("Bot started, waiting for messages")
-        await self.client.run_until_disconnected()
-
-    async def _handle_message(self, message: Message) -> None:
-        """Handle new message events."""
-        chat = await message.get_chat()
-        sender = await message.get_sender()
-        
-        # Skip messages from bots
-        if sender and sender.bot:
-            return
-
-        # Check if private chat or bot was mentioned
-        is_private = message.is_private
-        was_mentioned = message.mentioned
-        
-        if not (is_private or was_mentioned):
-            return
-
-        # Extract images and text
-        images = await self._extract_images(message)
-        text = message.text or message.raw_text or ""
-        
-        # Handle URLs first
-        urls = self._extract_urls(text)
-        if urls:
-            await self._handle_url_download(message, urls[0])
-            return
-
-        # Handle chat message
-        conversation_context = await self.assistant.get_conversation_context(message)
-        await self.assistant.handle_message(message, images, conversation_context)
-
-    async def _handle_callback(self, event: CallbackQuery.Event) -> None:
-        """Handle callback query events."""
-        # ...existing callback handling code...
-
-    async def _extract_images(self, message: Message) -> List[str]:
-        """Extract image files from message."""
-        images = []
-        if message.media:
-            if isinstance(message.media, MessageMediaPhoto):
-                images.append(await message.download_media(bytes))
-            elif isinstance(message.media, MessageMediaDocument):
-                if message.media.document.mime_type.startswith('image/'):
-                    images.append(await message.download_media(bytes))
-        return images
 
     async def _initialize_downloaders(self):
         """Initialize all supported downloaders."""
@@ -175,9 +101,39 @@ class VideoDownloadBot:
 
         logger.debug(f"Initialized {len(self.downloaders)} downloaders")
 
-    async def _handle_url_download(self, message: Message, url: str):
+    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle incoming message with non-blocking concurrent processing."""
+        if not update.effective_user \
+            or update.effective_user.id == self.bot_id \
+            or update.effective_user.is_bot \
+            or not update.effective_message \
+            or update.edited_message:
+            return
+
+        message = update.effective_message
+
+        # Check if this is a private chat or bot was mentioned
+        is_private_chat = message.chat.type == "private"
+        was_mentioned = self._bot_was_mentioned(update)
+        is_reply = message.reply_to_message is not None and message.reply_to_message.from_user.id == self.bot_id
+        
+        if not (is_private_chat or was_mentioned or is_reply):
+            return
+
+        # Extract message text and images
+        text = message.text or message.caption or ""
+        
+        # Handle URLs first
+        urls = self._extract_urls(text)
+        if urls:
+            await self._handle_url_download(urls[0], message)
+            return
+
+        await self.assistant.handle_message(update, context)
+
+    async def _handle_url_download(self, url: str, message: Message):
         """Handle URL download in a separate task."""
-        user_id = message.sender_id
+        user_id = message.from_user.id
         process_task = asyncio.create_task(
             self._process_download(user_id, url, message)
         )
@@ -202,16 +158,24 @@ class VideoDownloadBot:
             raise
         except Exception as e:
             logger.error(f"Error processing download: {e}", exc_info=True)
-            await message.reply("Анлак, произошла ошибка. Попробуй позже.")
+            await message.reply_text(
+                "Анлак, произошла ошибка. Попробуй позже.",
+                reply_to_message_id=message.message_id
+            )
             
     async def _handle_download(self, user_id: int, url: str, message: Message):
         """Handle the actual download process."""
-        status_message: Message = await message.reply("Воу-воу... Работяги добывают контент, подождите, пожалуйста.")
+        status_message = await message.reply_text(
+            "Воу-воу... Работяги добывают контент, подождите, пожалуйста.",
+            reply_to_message_id=message.message_id
+        )
         
         try:
             downloader = next((d for d in self.downloaders if d.can_handle(url)), None)
             if not downloader:
-                await self.client.edit_message(status_message, "Анлак, я не умею скачивать контент с этого ресурса!")
+                await status_message.edit_text(
+                    "Анлак, я не умею скачивать контент с этого ресурса!"
+                )
                 return
                 
             download_result = await asyncio.wait_for(
@@ -220,10 +184,10 @@ class VideoDownloadBot:
             )
             
             if not download_result:
-                await self.client.edit_message(status_message, "Анлак, не получилось скачать контент.")
+                await status_message.edit_text("Анлак, не получилось скачать контент.")
                 return
-            
-            await self.client.edit_message(status_message, "Опаааа! Работяги завершили работу. Обрабатываем контент...")
+                
+            await status_message.edit_text("Опаааа! Работяги завершили работу. Обрабатываем контент...")
             
             # Convert to MediaItems
             media_items = [
@@ -240,10 +204,14 @@ class VideoDownloadBot:
 
         except asyncio.TimeoutError:
             logger.error("Operation timed out")
-            await self.client.edit_message(status_message, "Анлак, действие заняло слишком много времени. Попробуй позже.")
+            await status_message.edit_text(
+                "Анлак, действие заняло слишком много времени. Попробуй позже."
+            )
         except Exception as e:
             logger.error(f"Error handling download: {e}", exc_info=True)
-            await self.client.edit_message(message, "Анлак, произошла ошибка. Попробуй позже.")
+            await status_message.edit_text(
+                "Анлак, произошла ошибка. Попробуй позже."
+            )
 
     async def _send_media_items(
         self,
@@ -265,82 +233,47 @@ class VideoDownloadBot:
             if not processed_data:
                 continue
 
-            # Create file-like object for the processed data
-            file = BytesIO(processed_data)
-            
             if item.media_type == MediaType.AUDIO:
-                # Set up audio attributes
-                attributes = [
-                    DocumentAttributeAudio(
-                        duration=0,  # Duration will be auto-detected
-                        voice=True  # Mark as voice message
-                    ),
-                    DocumentAttributeFilename(
-                        file_name='audio.ogg'
-                    )
-                ]
-                audio_items.append({
-                    'file': file,
-                    'attributes': attributes,
-                    'caption': item.caption
-                })
+                audio_items.append((processed_data, item.caption))
             elif item.media_type in (MediaType.VIDEO, MediaType.PHOTO):
-                # For videos, add streaming and other attributes
-                attributes = []
-                if item.media_type == MediaType.VIDEO:
-                    attributes.extend([
-                        DocumentAttributeVideo(
-                            duration=0,  # Duration will be auto-detected
-                            w=0,  # Width will be auto-detected
-                            h=0,  # Height will be auto-detected
-                            supports_streaming=True
-                        ),
-                        DocumentAttributeFilename(
-                            file_name='video.mp4'
+                media_cls = InputMediaVideo if item.media_type == MediaType.VIDEO else InputMediaPhoto
+                photos_and_videos.append(media_cls(
+                    media=processed_data,
+                    caption=item.caption,
+                    caption_entities=[
+                        MessageEntity(
+                            type="custom_emoji",  # Using custom_emoji as a hack to store metadata
+                            offset=0,
+                            length=0,
+                            custom_emoji_id=self.MEDIA_BOT_TAG
                         )
-                    ])
-                
-                photos_and_videos.append({
-                    'file': file,
-                    'caption': item.caption,
-                    'force_document': item.media_type == MediaType.VIDEO,
-                    'attributes': attributes if attributes else None,
-                    'supports_streaming': item.media_type == MediaType.VIDEO
-                })
+                    ] if item.caption else None
+                ))
 
-        # Send photos and videos
+        # Send photos and videos as media group
         if photos_and_videos:
-            # For multiple files, send as group
-            files = []
-            for item in photos_and_videos:
-                file_dict = {
-                    'file': item['file'],
-                    'force_document': item['force_document']
-                }
-                if item.get('attributes'):
-                    file_dict['attributes'] = item['attributes']
-                if item.get('supports_streaming'):
-                    file_dict['supports_streaming'] = item['supports_streaming']
-                files.append(file_dict)
-
-            captions = [item['caption'] for item in photos_and_videos if item['caption']]
-            await self.client.send_file(
-                entity=message.chat_id,
-                file=files,
-                caption=captions[0] if captions else None,
-                reply_to=message.id
+            await message.reply_media_group(
+                media=photos_and_videos,
+                reply_to_message_id=message.message_id
             )
 
-        # Send audio files
-        for audio_item in audio_items:
-            await self.client.send_file(
-                entity=message.chat_id,
-                file=audio_item['file'],
-                caption=audio_item['caption'],
-                attributes=audio_item['attributes'],
-                reply_to=message.id
+        # Send audio files separately (Telegram doesn't support audio in media groups)
+        for audio_data, caption in audio_items:
+            await message.reply_audio(
+                audio=audio_data,
+                caption=caption,
+                title=caption or "Audio track",
+                reply_to_message_id=message.message_id,
+                caption_entities=[
+                    MessageEntity(
+                        type="custom_emoji",
+                        offset=0,
+                        length=0,
+                        custom_emoji_id=self.MEDIA_BOT_TAG
+                    )
+                ] if caption else None
             )
-        
+
     async def _process_media(
         self,
         media_item: MediaItem,
@@ -357,9 +290,9 @@ class VideoDownloadBot:
 
         # Check size limits first
         if size_mb > self.MAX_COMPRESS_SIZE_MB:
-            await self.client.edit_message(
-                status_message,
-                f"Анлак, видео слишком большое ({size_mb:.1f}MB) для обработки. Выбери видео поменьше."
+            await status_message.edit_text(
+                f"Анлак, видео слишком большое ({size_mb:.1f}MB) для обработки. "
+                "Выбери видео поменьше."
             )
             return None
 
@@ -373,7 +306,7 @@ class VideoDownloadBot:
             compression_msg = "Применяем сжатие видео..."
             if size_mb > self.MAX_TELEGRAM_SIZE_MB:
                 compression_msg = f"Сжимаем большое видео размером {size_mb:.1f}MB..."
-            await self.client.edit_message(status_message, compression_msg)
+            await status_message.edit_text(compression_msg)
 
             # Apply compression with force_compress for videos above threshold
             force_compress = size_mb > self.config.compression.default_compress_threshold_mb
@@ -385,22 +318,23 @@ class VideoDownloadBot:
             )
             
             if not compressed_data:
-                await self.client.edit_message(status_message, "Анлак, не удалось сжать видео. Выбери видео поменьше.")
+                await status_message.edit_text(
+                    "Анлак, не удалось сжать видео. Выбери видео поменьше."
+                )
                 return None
             
             compressed_size = len(compressed_data) / (1024 * 1024)
             logger.debug(f"Compression result for user {user_id}: {size_mb:.2f}MB -> {compressed_size:.2f}MB")
             
             if compressed_size > self.MAX_TELEGRAM_SIZE_MB:
-                await self.client.edit_message(
-                    status_message,
+                await status_message.edit_text(
                     f"Анлак, даже после сжатия видео слишком большое ({compressed_size:.1f}MB). "
                     "Выбери видео поменьше."
                 )
                 return None
                 
             if compressed_size < size_mb:
-                await self.client.edit_message(status_message, "Сжатие завершено, готовим к отправке...")
+                await status_message.edit_text("Сжатие завершено, готовим к отправке...")
                 return compressed_data
             else:
                 logger.debug("Compression didn't reduce file size, using original")
@@ -408,6 +342,25 @@ class VideoDownloadBot:
 
         return media_item.data
 
+    def _bot_was_mentioned(self, update: Update) -> bool:
+        """Check if the bot was mentioned in the message."""
+        message = update.effective_message
+        if not message:
+            return False
+        
+        bot_mention = f"@{update.get_bot().username}".lower()
+        if not message.entities and message.caption:
+            return message.caption.lower().find(bot_mention) != -1
+            
+        if message.entities:
+            return any(
+                entity.type == "mention" and 
+                message.parse_entity(entity).lower() == bot_mention
+                for entity in message.entities
+            )
+        
+        return False
+        
     def _extract_urls(self, text: str) -> List[str]:
         """Extract URLs from message text."""
         return re.findall(r'(https?://\S+)', text)
@@ -428,20 +381,21 @@ class VideoDownloadBot:
             await asyncio.gather(*tasks, return_exceptions=True)
             del self.message_tasks[user_id]
 
-    async def stop(self) -> None:
-        """Stop the bot properly."""
-        try:
-            await self.client.disconnect()
-        except:
-            pass
-        
-        # Cleanup resources
-        self.assistant.clear_history()
+    async def cleanup(self):
+        """Clean up resources when shutting down."""
+        # Cancel all active tasks
+        all_tasks = []
+        for user_id in list(self.message_tasks.keys()):
+            all_tasks.extend(self.message_tasks[user_id])
+            
+        for task in all_tasks:
+            task.cancel()
+            
+        if all_tasks:
+            await asyncio.gather(*all_tasks, return_exceptions=True)
+            
+        # Clean up all temporary directories
         self.temp_manager.cleanup_all_temp_dirs()
+        
+        # Shutdown thread pool in video processor
         self.video_processor.thread_pool.shutdown(wait=True)
-
-    def get_user_semaphore(self, user_id: int) -> asyncio.Semaphore:
-        """Get or create a semaphore for a specific user."""
-        if user_id not in self.user_semaphores:
-            self.user_semaphores[user_id] = asyncio.Semaphore(self.max_downloads_per_user)
-        return self.user_semaphores[user_id]
