@@ -240,8 +240,6 @@ class VideoDownloadBot:
                 photos_and_videos.append(media_cls(
                     media=processed_data,
                     caption=item.caption,
-                    has_spoiler=True,  # Add spoiler to prevent autoplay
-                    parse_mode=None,  # Disable markdown parsing
                     caption_entities=[
                         MessageEntity(
                             type="custom_emoji",  # Using custom_emoji as a hack to store metadata
