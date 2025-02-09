@@ -1,15 +1,14 @@
-#import os
 import re
 import asyncio
 import logging
 from typing import Dict, List, Optional, Set
+from downloaders.base import VideoDownloader
 from temp_manager import TempManager
 from media_types import DownloadResult, MediaType, MediaItem
 from video_processor import VideoProcessor
 from config import Config
 from telegram.ext import ContextTypes, Application
-from telegram import Update, InputMediaPhoto, InputMediaVideo, Message, PhotoSize, Bot, MessageEntity
-from telegram.constants import ChatAction
+from telegram import Update, InputMediaPhoto, InputMediaVideo, Message, Bot, MessageEntity
 from assistant import ChatAssistant
 
 logger = logging.getLogger(__name__)
@@ -18,6 +17,8 @@ logger.setLevel(logging.DEBUG)
 class VideoDownloadBot:
     MEDIA_BOT_TAG = "media_bot_message"  # Tag for identifying bot-generated media messages
     bot_id: Optional[int] = None
+    downloaders: list[VideoDownloader] = []
+    auto_downloaders: list[VideoDownloader] = []
 
     def __init__(self, config: Config):
         """Initialize bot with configuration."""
@@ -25,7 +26,6 @@ class VideoDownloadBot:
 
         self.temp_manager = TempManager(config.temp_dir)
         self.video_processor = VideoProcessor(config, self.temp_manager)
-        self.downloaders = []
         
         # Use compression config values instead of hardcoded ones
         self.MAX_TELEGRAM_SIZE_MB = config.compression.max_telegram_size_mb
@@ -92,11 +92,20 @@ class VideoDownloadBot:
         from downloaders.coub import CoubDownloader
         from downloaders.instagram import InstagramDownloader
 
+        # Keep direct references to TikTok and Coub downloaders for type checking
+        tiktok_downloader = TikTokDownloader(self.config)
+        coub_downloader = CoubDownloader(self.config)
+        
         self.downloaders = [
-            TikTokDownloader(self.config),
+            tiktok_downloader,
+            coub_downloader,
             YouTubeShortsDownloader(self.config),
-            CoubDownloader(self.config),
             InstagramDownloader(self.config)
+        ]
+
+        self.auto_downloaders = [
+            tiktok_downloader,
+            coub_downloader,
         ]
 
         logger.debug(f"Initialized {len(self.downloaders)} downloaders")
@@ -111,8 +120,20 @@ class VideoDownloadBot:
             return
 
         message = update.effective_message
+        text = message.text or message.caption or ""
+        urls = self._extract_urls(text)
+        
+        # Check for TikTok or Coub URLs
+        auto_download_urls = [
+            url for url in urls 
+            if any(d.can_handle(url) for d in self.auto_downloaders)
+        ]
+        
+        if auto_download_urls:
+            await self._handle_url_download(auto_download_urls[0], message)
+            return
 
-        # Check if this is a private chat or bot was mentioned
+        # Check if this is a private chat or bot was mentioned for other interactions
         is_private_chat = message.chat.type == "private"
         was_mentioned = self._bot_was_mentioned(update)
         is_reply = message.reply_to_message is not None and message.reply_to_message.from_user.id == self.bot_id
@@ -120,12 +141,8 @@ class VideoDownloadBot:
         if not (is_private_chat or was_mentioned or is_reply):
             return
 
-        # Extract message text and images
-        text = message.text or message.caption or ""
-        
-        # Handle URLs first
-        urls = self._extract_urls(text)
-        if urls:
+        # Handle URLs for other services when bot is mentioned
+        if urls and not auto_download_urls:
             await self._handle_url_download(urls[0], message)
             return
 
