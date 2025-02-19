@@ -233,7 +233,7 @@ class ChatAssistant:
         if len(images) < 1 and message.reply_to_message:
             images = await self._get_message_images(message.reply_to_message)
 
-        if not self._is_valid_message(message) or (len(images) < 1 and len(message.text.strip()) < 1):
+        if not self._is_valid_message(message) or (len(images) < 1 and message.text and len(message.text.strip()) < 1):
             return
 
         user_id = message.from_user.id
