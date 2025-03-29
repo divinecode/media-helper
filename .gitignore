@@ -1,1 +1,3 @@
 prod.env
+app/state/.inst_session
+app/har_and_cookies

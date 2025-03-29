@@ -2,13 +2,13 @@ import re
 import asyncio
 import logging
 from typing import Dict, List, Optional, Set
-from downloaders.base import VideoDownloader
+from telegram.ext import ContextTypes, Application
+from telegram import Bot, Update, Message, InputMediaPhoto, InputMediaVideo
+from config import Config
 from temp_manager import TempManager
 from media_types import DownloadResult, MediaType, MediaItem
+from downloaders.base import VideoDownloader
 from video_processor import VideoProcessor
-from config import Config
-from telegram.ext import ContextTypes, Application
-from telegram import Update, InputMediaPhoto, InputMediaVideo, Message, Bot, MessageEntity
 from assistant import ChatAssistant
 
 logger = logging.getLogger(__name__)
@@ -121,6 +121,9 @@ class VideoDownloadBot:
         message = update.effective_message
         text = message.text or message.caption or ""
         urls = self._extract_urls(text)
+
+        if text:
+            logger.debug(f"{message.from_user.name}: {text}")
         
         # Check for TikTok or Coub URLs
         auto_download_urls = [

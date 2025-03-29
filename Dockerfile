@@ -1,5 +1,5 @@
 # Use a slim Python base image
-FROM python:3.11-slim
+FROM python:3-slim
 
 # Cache dependencies
 RUN --mount=type=cache,target=/root/.cache/pip pip install pyyaml
